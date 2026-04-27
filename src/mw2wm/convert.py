@@ -307,6 +307,19 @@ def _convert_quote_emphasis(text: str) -> str:
     return _BOLD_ITALIC_RE.sub(_replace, text)
 
 
+def _md_link_target(target: str) -> str:
+    """Normalize a wiki page name for use as a Markdown link target.
+
+    Replaces spaces with underscores (canonical wiki path form) and
+    wraps in angle brackets if the target contains parentheses
+    (which would otherwise break Markdown link parsing).
+    """
+    target = target.replace(" ", "_")
+    if "(" in target or ")" in target:
+        return f"<{target}>"
+    return target
+
+
 def _convert_wikilink(node: Any, state: _ConvertState) -> str:
     """Convert ``[[Target]]`` and ``[[Target|Display]]`` forms."""
     target = str(node.title).strip()
@@ -318,13 +331,10 @@ def _convert_wikilink(node: Any, state: _ConvertState) -> str:
         if target.startswith(":Category:"):
             # In-body link with colon prefix — display as normal
             display_text = display or target[len(":Category:"):]
-            href = target[1:].replace(" ", "_")
-            return f"[{display_text}]({href})"
+            return f"[{display_text}]({_md_link_target(target[1:])})"
         # Plain category → frontmatter, no body output
         name = target[len("Category:"):]
         if display:
-            # Category with display text = sort-key in MediaWiki; we
-            # ignore sort-key for v0.1 migration.
             pass
         state.add_category(name)
         return ""
@@ -338,9 +348,7 @@ def _convert_wikilink(node: Any, state: _ConvertState) -> str:
 
     # Normal wiki link
     if display:
-        # Per WikiMark spec: piped links become MD links with a wiki
-        # target. The parser interprets non-URI targets as wiki pages.
-        return f"[{display}]({target})"
+        return f"[{display}]({_md_link_target(target)})"
     return f"[[{target}]]"
 
 

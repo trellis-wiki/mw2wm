@@ -141,6 +141,8 @@ class _ConvertState:
     frontmatter: dict[str, Any] = field(default_factory=dict)
     footnotes: list[str] = field(default_factory=list)
     named_footnotes: dict[str, int] = field(default_factory=dict)
+    _list_depth: int = 0
+    _list_type: str = ""
 
     def add_category(self, name: str) -> None:
         self.frontmatter.setdefault("categories", []).append(name)
@@ -182,6 +184,19 @@ def _convert_nodes(nodes: Any, state: _ConvertState) -> str:
     return result
 
 
+def _flush_list_marker(state: _ConvertState) -> str:
+    """Emit accumulated GFM list prefix and reset depth."""
+    if state._list_depth == 0:
+        return ""
+    depth = state._list_depth
+    marker_type = state._list_type
+    state._list_depth = 0
+    state._list_type = ""
+    if marker_type == "#":
+        return "   " * (depth - 1) + "1. "
+    return "  " * (depth - 1) + "* "
+
+
 def _convert_node(node: Any, state: _ConvertState) -> str:
     """Dispatch by node type (duck-typed against mwparserfromhell)."""
     from mwparserfromhell.nodes import (
@@ -189,32 +204,47 @@ def _convert_node(node: Any, state: _ConvertState) -> str:
         Tag, Comment, HTMLEntity, Argument,
     )
 
-    if isinstance(node, Text):
-        return _convert_text(str(node), state)
-    if isinstance(node, Wikilink):
-        return _convert_wikilink(node, state)
-    if isinstance(node, Template):
-        return _convert_template(node, state)
-    if isinstance(node, ExternalLink):
-        return _convert_external_link(node, state)
-    if isinstance(node, Heading):
-        return _convert_heading(node, state)
-    if isinstance(node, Tag):
+    # List markers (Tag li with wiki_markup) are accumulated in state
+    # by _convert_tag. Before emitting any other node, flush the
+    # accumulated prefix so ``*[[link]]`` becomes ``* [[link]]``.
+    is_list_marker = (
+        isinstance(node, Tag)
+        and str(node.tag).lower() == "li"
+        and getattr(node, "wiki_markup", None) in ("*", "#")
+    )
+
+    if is_list_marker:
         return _convert_tag(node, state)
+
+    prefix = _flush_list_marker(state)
+
+    if isinstance(node, Text):
+        text = str(node)
+        if prefix and text.startswith(" "):
+            text = text[1:]
+        return prefix + _convert_text(text, state)
+    if isinstance(node, Wikilink):
+        return prefix + _convert_wikilink(node, state)
+    if isinstance(node, Template):
+        return prefix + _convert_template(node, state)
+    if isinstance(node, ExternalLink):
+        return prefix + _convert_external_link(node, state)
+    if isinstance(node, Heading):
+        return prefix + _convert_heading(node, state)
+    if isinstance(node, Tag):
+        return prefix + _convert_tag(node, state)
     if isinstance(node, Comment):
-        return ""  # HTML comments stripped silently
+        return prefix  # HTML comments stripped silently
     if isinstance(node, HTMLEntity):
-        return str(node)
+        return prefix + str(node)
     if isinstance(node, Argument):
-        # Template args like {{{1}}} shouldn't appear in fully-expanded
-        # Main pages; pass through as literal for report-ability.
         state.report.add(
             "template-argument", state.title, str(node),
         )
-        return str(node)
+        return prefix + str(node)
     # Fallback: pass through raw text
     state.report.add("unknown-node-type", state.title, type(node).__name__)
-    return str(node)
+    return prefix + str(node)
 
 
 # ---------------------------------------------------------------------------
@@ -515,11 +545,15 @@ def _convert_tag(node: Any, state: _ConvertState) -> str:
         marker = {"''": "*", "'''": "**", "'''''": "***"}[wiki_markup]
         return f"{marker}{inner}{marker}"
 
-    # MediaWiki bullet lists become Tag(ul/ol/li) — but only when the
-    # page uses nested HTML-list markup. Regular ``* item`` markup is
-    # parsed as plain text and stays as-is (GFM supports it natively).
-    # So HTML list tags: pass through; mwparserfromhell gives us the
-    # raw form.
+    # MediaWiki list markers: mwparserfromhell parses ``*item`` as
+    # self-closing Tag(li, wiki_markup='*'). Consecutive markers
+    # (``**item``) produce multiple Tag nodes. We accumulate depth
+    # and emit the GFM list prefix when the next non-marker node
+    # consumes it (via _flush_list_marker).
+    if tag == "li" and wiki_markup in ("*", "#"):
+        state._list_depth += 1
+        state._list_type = wiki_markup
+        return ""
 
     if tag == "ref":
         return _convert_ref(node, state)

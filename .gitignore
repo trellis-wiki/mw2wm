@@ -1,0 +1,30 @@
+# Fetched wiki content — private, never commit
+input/
+output/
+SURVEY.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtualenvs
+.venv/
+venv/
+
+# Build artifacts
+build/
+dist/
+*.whl
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~
+PLAN.md

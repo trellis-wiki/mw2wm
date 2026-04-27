@@ -1,0 +1,598 @@
+"""
+Core wikitext → WikiMark conversion.
+
+Uses ``mwparserfromhell`` for tokenization — it's the standard
+Python MediaWiki parser, battle-tested against Wikipedia's corpus,
+and handles the nasty edge cases (nested templates, unclosed
+brackets, etc.) far better than anything we'd write ourselves.
+
+Strategy: one pass over the parsed node tree. For each node type
+we know, emit the equivalent WikiMark. For unknown nodes, pass
+through the raw text and log to the conversion report.
+
+Frontmatter is accumulated as a dict and emitted at the top of the
+output document. Categories, display titles, default sort keys, and
+redirect targets all flow into frontmatter.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from typing import Any
+
+import mwparserfromhell as mwp
+import yaml
+
+from . import templates as tpl
+from .report import Report
+
+
+# Magic words we extract to frontmatter. Keys are canonical (colon-
+# prefixed) names; values are the frontmatter field the content maps
+# to. Behavior switches (like ``__NOTOC__``) have empty-string content.
+_MAGIC_PREFIX_MAP = {
+    "DISPLAYTITLE": "title",
+    "DEFAULTSORT": "sort_key",
+}
+_MAGIC_SWITCHES = {
+    "__NOTOC__": ("toc", False),
+    "__NOEDITSECTION__": ("editable_sections", False),
+    "__TOC__": ("toc", True),
+    "__FORCETOC__": ("toc", True),
+}
+
+
+@dataclass
+class ConvertedPage:
+    """Output of converting a single wikitext page."""
+
+    frontmatter: dict[str, Any] = field(default_factory=dict)
+    body: str = ""
+    redirect: str | None = None
+
+    def to_wikimark(self) -> str:
+        if self.redirect:
+            # Redirects are frontmatter-only; no body needed.
+            return _emit_frontmatter({"redirect": self.redirect})
+        out = _emit_frontmatter(self.frontmatter) if self.frontmatter else ""
+        if out and self.body:
+            out += "\n"
+        return out + self.body
+
+
+def _emit_frontmatter(fm: dict[str, Any]) -> str:
+    """Serialize the frontmatter dict to a ``---``-fenced YAML block."""
+    if not fm:
+        return ""
+    yaml_body = yaml.safe_dump(fm, sort_keys=False, allow_unicode=True).strip()
+    return f"---\n{yaml_body}\n---\n"
+
+
+# ---------------------------------------------------------------------------
+# Entry points
+# ---------------------------------------------------------------------------
+
+
+def convert_page(
+    wikitext: str,
+    *,
+    title: str = "",
+    report: Report | None = None,
+) -> ConvertedPage:
+    """Convert a single MediaWiki page to a ConvertedPage result.
+
+    Args:
+        wikitext: Raw MediaWiki source.
+        title: Page title (used only for report attribution).
+        report: Accumulator for unhandled constructs. A new Report is
+            created and discarded if None (useful for tests).
+    """
+    report = report or Report()
+    state = _ConvertState(title=title, report=report)
+
+    # Check for #REDIRECT before parsing — it must be at the top of
+    # the file and is simple enough to handle without mwparserfromhell.
+    redirect_match = re.match(
+        r"^\s*#REDIRECT\s*\[\[([^\]|]+)(?:\|[^\]]*)?\]\]\s*$",
+        wikitext,
+        re.IGNORECASE | re.MULTILINE,
+    )
+    if redirect_match:
+        target = redirect_match.group(1).strip()
+        page = ConvertedPage(redirect=target)
+        return page
+
+    parsed = mwp.parse(wikitext)
+    body = _convert_nodes(parsed.nodes, state)
+
+    # Clean up body: collapse excessive blank lines; strip leading/
+    # trailing whitespace; ensure trailing newline.
+    body = re.sub(r"\n{3,}", "\n\n", body)
+    body = body.strip() + "\n"
+
+    result = ConvertedPage(frontmatter=state.frontmatter, body=body)
+    # Dedupe category list (order-preserving)
+    if "categories" in result.frontmatter:
+        seen: set[str] = set()
+        uniq: list[str] = []
+        for c in result.frontmatter["categories"]:
+            if c not in seen:
+                seen.add(c)
+                uniq.append(c)
+        result.frontmatter["categories"] = uniq
+    return result
+
+
+def convert_text(wikitext: str, *, title: str = "") -> str:
+    """Convenience: convert to a WikiMark string in one call."""
+    return convert_page(wikitext, title=title).to_wikimark()
+
+
+# ---------------------------------------------------------------------------
+# Conversion state
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _ConvertState:
+    title: str
+    report: Report
+    frontmatter: dict[str, Any] = field(default_factory=dict)
+    footnotes: list[str] = field(default_factory=list)
+    named_footnotes: dict[str, int] = field(default_factory=dict)
+
+    def add_category(self, name: str) -> None:
+        self.frontmatter.setdefault("categories", []).append(name)
+
+    def set_fm(self, key: str, value: Any) -> None:
+        self.frontmatter[key] = value
+
+    def new_footnote(self, content: str, ref_name: str = "") -> str:
+        """Add a footnote. Returns the ``[^id]`` marker text."""
+        if ref_name and ref_name in self.named_footnotes:
+            return f"[^{ref_name}]"
+        idx = len(self.footnotes) + 1
+        if ref_name:
+            ident = ref_name
+            self.named_footnotes[ref_name] = idx
+        else:
+            ident = str(idx)
+        self.footnotes.append(f"[^{ident}]: {content}")
+        return f"[^{ident}]"
+
+
+# ---------------------------------------------------------------------------
+# Node dispatch
+# ---------------------------------------------------------------------------
+
+
+def _convert_nodes(nodes: Any, state: _ConvertState) -> str:
+    """Walk a sequence of mwparserfromhell Nodes, emit WikiMark."""
+    out: list[str] = []
+    for node in nodes:
+        out.append(_convert_node(node, state))
+
+    result = "".join(out)
+
+    # Append footnotes at the bottom if any exist
+    if state.footnotes:
+        result += "\n\n" + "\n".join(state.footnotes) + "\n"
+
+    return result
+
+
+def _convert_node(node: Any, state: _ConvertState) -> str:
+    """Dispatch by node type (duck-typed against mwparserfromhell)."""
+    from mwparserfromhell.nodes import (
+        Text, Template, Wikilink, ExternalLink, Heading,
+        Tag, Comment, HTMLEntity, Argument,
+    )
+
+    if isinstance(node, Text):
+        return _convert_text(str(node), state)
+    if isinstance(node, Wikilink):
+        return _convert_wikilink(node, state)
+    if isinstance(node, Template):
+        return _convert_template(node, state)
+    if isinstance(node, ExternalLink):
+        return _convert_external_link(node, state)
+    if isinstance(node, Heading):
+        return _convert_heading(node, state)
+    if isinstance(node, Tag):
+        return _convert_tag(node, state)
+    if isinstance(node, Comment):
+        return ""  # HTML comments stripped silently
+    if isinstance(node, HTMLEntity):
+        return str(node)
+    if isinstance(node, Argument):
+        # Template args like {{{1}}} shouldn't appear in fully-expanded
+        # Main pages; pass through as literal for report-ability.
+        state.report.add(
+            "template-argument", state.title, str(node),
+        )
+        return str(node)
+    # Fallback: pass through raw text
+    state.report.add("unknown-node-type", state.title, type(node).__name__)
+    return str(node)
+
+
+# ---------------------------------------------------------------------------
+# Converters per node kind
+# ---------------------------------------------------------------------------
+
+
+# MediaWiki inline formatting → GFM
+_BOLD_ITALIC_RE = re.compile(r"'{2,5}")
+
+
+def _convert_text(text: str, state: _ConvertState) -> str:
+    """Convert a plain text run — mainly rewriting MediaWiki ''' and ''
+    emphasis markers to GFM **...** / *...* equivalents.
+    """
+    # Quote-based emphasis. MediaWiki uses:
+    #   '' ... ''        → italic
+    #   ''' ... '''      → bold
+    #   ''''' ... '''''  → bold + italic
+    # We do a stateful pass: detect the longest opening run, find the
+    # matching close run of the same length, convert.
+    text = _convert_quote_emphasis(text)
+
+    # Magic-word switches (__NOTOC__, etc.). Handled here because they
+    # can appear mid-text without being their own nodes.
+    for magic, (key, value) in _MAGIC_SWITCHES.items():
+        if magic in text:
+            state.set_fm(key, value)
+            text = text.replace(magic, "")
+
+    # Escape WikiMark-meaningful sequences that aren't also GFM-
+    # meaningful. Primarily `[[` is now a wiki-link opener (which is
+    # fine since we already processed wikilinks via the AST). We leave
+    # raw `[[` and `{{` in text as literal — the spec already handles
+    # unclosed delimiters as literal.
+    return text
+
+
+def _convert_quote_emphasis(text: str) -> str:
+    """Rewrite MediaWiki '' and ''' emphasis markers as GFM * and **."""
+    # Strategy: find the longest-possible run at each position, emit a
+    # matching marker. The MediaWiki parser has subtle rules around
+    # mid-word quotes; we take a simpler approach that covers the
+    # common paragraph-boundary case correctly.
+    def _replace(match: re.Match[str]) -> str:
+        run_len = len(match.group(0))
+        if run_len == 2:
+            return "*"
+        if run_len == 3:
+            return "**"
+        if run_len == 5:
+            return "***"
+        # 4 or 6+ — MediaWiki treats these oddly; emit one apostrophe
+        # plus the shorter marker.
+        if run_len == 4:
+            return "'*"
+        # 6+: 5-char marker plus extras
+        return "***" + "'" * (run_len - 5)
+
+    return _BOLD_ITALIC_RE.sub(_replace, text)
+
+
+def _convert_wikilink(node: Any, state: _ConvertState) -> str:
+    """Convert ``[[Target]]`` and ``[[Target|Display]]`` forms."""
+    target = str(node.title).strip()
+    display = str(node.text) if node.text else ""
+
+    # Special prefixes
+    if target.startswith("Category:") or target.startswith(":Category:"):
+        # [[Category:Foo]] → frontmatter; [[:Category:Foo]] → in-body link
+        if target.startswith(":Category:"):
+            # In-body link with colon prefix — display as normal
+            display_text = display or target[len(":Category:"):]
+            href = target[1:].replace(" ", "_")
+            return f"[{display_text}]({href})"
+        # Plain category → frontmatter, no body output
+        name = target[len("Category:"):]
+        if display:
+            # Category with display text = sort-key in MediaWiki; we
+            # ignore sort-key for v0.1 migration.
+            pass
+        state.add_category(name)
+        return ""
+
+    if target.startswith("File:") or target.startswith("Image:"):
+        return _convert_file_link(node, state)
+
+    if ":" in target and target.split(":", 1)[0] in ("Special",):
+        state.report.add("special-link", state.title, target)
+        return display or target
+
+    # Normal wiki link
+    if display:
+        # Per WikiMark spec: piped links become MD links with a wiki
+        # target. The parser interprets non-URI targets as wiki pages.
+        return f"[{display}]({target})"
+    return f"[[{target}]]"
+
+
+_FILE_OPT_RE = re.compile(r"^(?:thumb|thumbnail|frame|frameless|border)$",
+                          re.IGNORECASE)
+_FILE_SIZE_RE = re.compile(r"^(\d+)(?:x(\d+))?(px)?$")
+_FILE_ALIGN_RE = re.compile(r"^(?:left|right|center|centre|none)$",
+                            re.IGNORECASE)
+
+
+def _convert_file_link(node: Any, state: _ConvertState) -> str:
+    """Convert ``[[File:X.jpg|thumb|200px|caption]]`` to WikiMark image."""
+    target = str(node.title).strip()
+    filename = target.split(":", 1)[1] if ":" in target else target
+
+    classes: list[str] = []
+    width: str | None = None
+    height: str | None = None
+    align: str | None = None
+    caption = ""
+
+    # mwparserfromhell's Wikilink.text is the pipe-joined params
+    # concatenated; we need the individual params. The library exposes
+    # them via iteration if we reparse — easier to grab them from the
+    # .params list when the node type is a Template-like wikilink.
+    # For wikilinks, `.text` holds everything after the first `|`.
+    # Split on pipe, but respect nested templates/links.
+    if node.text:
+        parts = _split_params(str(node.text))
+        for part in parts:
+            part = part.strip()
+            if _FILE_OPT_RE.match(part):
+                classes.append(part.lower())
+            elif _FILE_ALIGN_RE.match(part):
+                align = part.lower()
+            elif _FILE_SIZE_RE.match(part):
+                m = _FILE_SIZE_RE.match(part)
+                assert m is not None
+                width = m.group(1)
+                if m.group(2):
+                    height = m.group(2)
+            elif part.startswith(("link=", "alt=", "page=", "class=", "lang=",
+                                   "upright", "upright=")):
+                # Drop advanced options for v0.1; log for review
+                state.report.add("file-option-dropped", state.title, part)
+            else:
+                # Whatever's left is the caption
+                caption = part
+
+    alt = caption or filename
+    attrs = []
+    if classes:
+        attrs.extend(f".{c}" for c in classes)
+    if width:
+        attrs.append(f"width={width}")
+    if height:
+        attrs.append(f"height={height}")
+    if align:
+        attrs.append(f"align={align}")
+
+    attr_block = " ".join(attrs)
+    attr_str = f"{{{attr_block}}}" if attr_block else ""
+    return f"![{alt}]({filename}){attr_str}"
+
+
+def _split_params(s: str) -> list[str]:
+    """Split a wikitext parameter string on pipes, respecting
+    nested ``[[...]]`` and ``{{...}}``.
+    """
+    parts: list[str] = []
+    depth_brace = 0
+    depth_bracket = 0
+    start = 0
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if c == "{" and i + 1 < len(s) and s[i + 1] == "{":
+            depth_brace += 1; i += 2; continue
+        if c == "}" and i + 1 < len(s) and s[i + 1] == "}":
+            depth_brace -= 1; i += 2; continue
+        if c == "[" and i + 1 < len(s) and s[i + 1] == "[":
+            depth_bracket += 1; i += 2; continue
+        if c == "]" and i + 1 < len(s) and s[i + 1] == "]":
+            depth_bracket -= 1; i += 2; continue
+        if c == "|" and depth_brace == 0 and depth_bracket == 0:
+            parts.append(s[start:i])
+            start = i + 1
+        i += 1
+    parts.append(s[start:])
+    return parts
+
+
+def _convert_template(node: Any, state: _ConvertState) -> str:
+    """Convert ``{{Name|args}}`` — either to a built-in call, a
+    frontmatter field, or an error placeholder.
+    """
+    name = str(node.name).strip()
+
+    # Magic-word-style prefixes embedded as templates
+    if ":" in name:
+        prefix, _, value = name.partition(":")
+        prefix = prefix.strip()
+        if prefix in _MAGIC_PREFIX_MAP:
+            state.set_fm(_MAGIC_PREFIX_MAP[prefix], value.strip())
+            return ""
+        # Things like {{Fullurl:Category:X}} — drop with report entry
+        if prefix.lower() in ("fullurl", "ns", "urlencode", "anchorencode",
+                              "uc", "lc", "ucfirst", "lcfirst", "plural",
+                              "grammar", "formatnum"):
+            state.report.add("parser-magic", state.title, prefix)
+            # Fall back to the first positional arg (MediaWiki is 1-indexed)
+            return str(node.params[0].value) if node.params else ""
+
+    mapping = tpl.lookup(name)
+
+    # Inline template recursion: render child nodes of each param so
+    # nested wiki links / templates in args convert cleanly.
+    args: dict[str, str] = {}
+    for i, param in enumerate(node.params, start=1):
+        key = str(param.name).strip()
+        if param.showkey:
+            k = key
+        else:
+            k = str(i)
+        value = _convert_nodes(param.value.nodes, state).strip()
+        args[k] = value
+
+    if mapping is None:
+        state.report.add("unknown-template", state.title, name)
+        # Emit a WikiMark template call with a kebab-case name so
+        # Trellis produces a visible error indicator.
+        normalized = _kebabize(name)
+        return _emit_template_call(normalized, args)
+
+    if mapping.target is None:
+        # Handled via frontmatter or intentionally dropped
+        return ""
+
+    converted_args = mapping.apply(args)
+    return _emit_template_call(mapping.target, converted_args)
+
+
+def _kebabize(name: str) -> str:
+    """Convert a MediaWiki-style name to a kebab-case identifier."""
+    return name.strip().lower().replace(" ", "-").replace("_", "-")
+
+
+def _emit_template_call(name: str, args: dict[str, str]) -> str:
+    """Emit a WikiMark ``{{name ...}}`` call with the given args."""
+    if not args:
+        return f"{{{{{name}}}}}"
+    parts = []
+    for key, value in args.items():
+        if not value:
+            continue
+        # Keys that parse as positional in WikiMark (numeric) stay
+        # positional. Otherwise we always quote values.
+        if key.isdigit():
+            parts.append(f'"{_escape_arg(value)}"')
+        else:
+            parts.append(f'{key}="{_escape_arg(value)}"')
+    return f"{{{{{name} {' '.join(parts)}}}}}"
+
+
+def _escape_arg(value: str) -> str:
+    """Escape a value for use inside a WikiMark template arg."""
+    # Collapse newlines (WikiMark templates don't currently support
+    # multi-line) and escape embedded double quotes.
+    value = value.replace("\n", " ").strip()
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _convert_external_link(node: Any, state: _ConvertState) -> str:
+    """``[http://example.com label]`` and bare ``http://example.com``."""
+    url = str(node.url)
+    if node.title:
+        return f"[{_convert_nodes(node.title.nodes, state)}]({url})"
+    # Bare or numbered link — GFM handles autolinks for `<url>` form
+    return f"<{url}>"
+
+
+def _convert_heading(node: Any, state: _ConvertState) -> str:
+    """``== Heading ==`` → ``## Heading``."""
+    level = node.level
+    text = _convert_nodes(node.title.nodes, state).strip()
+    return "\n" + "#" * level + " " + text + "\n"
+
+
+# Extension tags we know how to handle
+def _convert_tag(node: Any, state: _ConvertState) -> str:
+    tag = str(node.tag).lower()
+
+    # MediaWiki quote-based emphasis. mwparserfromhell surfaces
+    #   '''bold''' → Tag(b, wiki_markup="'''")
+    #   ''italic'' → Tag(i, wiki_markup="''")
+    # Convert to GFM **...** / *...*. Anything else with tag=b/i is
+    # presumed to be raw HTML and passes through.
+    wiki_markup = getattr(node, "wiki_markup", None)
+    if wiki_markup in ("'''", "''", "'''''"):
+        inner = (_convert_nodes(node.contents.nodes, state)
+                 if node.contents else "")
+        marker = {"''": "*", "'''": "**", "'''''": "***"}[wiki_markup]
+        return f"{marker}{inner}{marker}"
+
+    # MediaWiki bullet lists become Tag(ul/ol/li) — but only when the
+    # page uses nested HTML-list markup. Regular ``* item`` markup is
+    # parsed as plain text and stays as-is (GFM supports it natively).
+    # So HTML list tags: pass through; mwparserfromhell gives us the
+    # raw form.
+
+    if tag == "ref":
+        return _convert_ref(node, state)
+    if tag == "references":
+        # Footnotes auto-emit at page end; this is a no-op.
+        return ""
+    if tag == "nowiki":
+        # Treat as literal text, wrapped in backticks if content
+        # likely to contain markdown-meaningful characters.
+        content = str(node.contents) if node.contents else ""
+        if any(c in content for c in "*_`[]{}"):
+            return f"`{content}`"
+        return content
+
+    # HTML-ish inline tags from MediaWiki syntax — pass through for GFM
+    # The GFM spec allows raw HTML; libwikimark's OPT_UNSAFE preserves it.
+    if tag in ("b", "i", "u", "s", "strike", "em", "strong",
+               "sub", "sup", "small", "big", "code", "tt", "pre",
+               "blockquote", "cite", "kbd", "samp", "var", "div", "span",
+               "br", "hr", "p", "center", "dl", "dt", "dd", "ol", "ul", "li"):
+        return str(node)
+
+    if tag == "syntaxhighlight" or tag == "source":
+        return _convert_syntaxhighlight(node, state)
+
+    if tag == "poem":
+        # <poem> preserves line breaks; simplest preservation is to
+        # wrap in raw HTML since GFM strips line breaks inside paragraphs.
+        return str(node)
+
+    if tag == "math":
+        # Preserve as raw HTML; Trellis can render with MathJax later.
+        return str(node)
+
+    if tag == "dpl":
+        # DynamicPageList3 — needs Trellis-side implementation. Emit a
+        # placeholder template so the page renders with a visible marker.
+        state.report.add("dpl-block", state.title, "<dpl>...</dpl>")
+        content = str(node.contents) if node.contents else ""
+        return (
+            f'\n\n<!-- MIGRATION: <dpl> block preserved as raw text below -->\n'
+            f'<div class="wm-dpl-placeholder">{content}</div>\n\n'
+        )
+
+    # Unknown tag — pass through raw and report
+    state.report.add("unknown-tag", state.title, tag)
+    return str(node)
+
+
+def _convert_ref(node: Any, state: _ConvertState) -> str:
+    """``<ref>...</ref>`` and ``<ref name="foo"/>`` → GFM footnote."""
+    ref_name = ""
+    if node.attributes:
+        for attr in node.attributes:
+            key = str(attr.name).strip()
+            if key == "name":
+                ref_name = str(attr.value).strip().strip('"').strip("'")
+
+    if node.self_closing or not node.contents:
+        # Reuse — just emit the marker
+        return f"[^{ref_name}]" if ref_name else ""
+
+    content = _convert_nodes(node.contents.nodes, state).strip()
+    return state.new_footnote(content, ref_name=ref_name)
+
+
+def _convert_syntaxhighlight(node: Any, state: _ConvertState) -> str:
+    """``<syntaxhighlight lang="py">...</syntaxhighlight>`` → fenced code."""
+    lang = ""
+    if node.attributes:
+        for attr in node.attributes:
+            key = str(attr.name).strip()
+            if key == "lang":
+                lang = str(attr.value).strip().strip('"').strip("'")
+    content = str(node.contents) if node.contents else ""
+    return f"\n```{lang}\n{content}\n```\n"

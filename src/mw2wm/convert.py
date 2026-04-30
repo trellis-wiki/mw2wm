@@ -110,7 +110,7 @@ def convert_page(
         return page
 
     parsed = mwp.parse(wikitext)
-    body = _convert_nodes(parsed.nodes, state)
+    body = _convert_nodes(parsed.nodes, state, _toplevel=True)
 
     # Clean up body: collapse excessive blank lines; strip leading/
     # trailing whitespace; ensure trailing newline.
@@ -201,6 +201,8 @@ class _ConvertState:
     template_library: dict[str, str] = field(default_factory=dict)
     _node_output: list[str] | None = None
     _pending_semantic: list[tuple[str, str]] | None = None
+    _template_depth: int = 0
+    _max_template_depth: int = 10
 
     def add_category(self, name: str) -> None:
         self.frontmatter.setdefault("categories", []).append(name)
@@ -227,7 +229,7 @@ class _ConvertState:
 # ---------------------------------------------------------------------------
 
 
-def _convert_nodes(nodes: Any, state: _ConvertState) -> str:
+def _convert_nodes(nodes: Any, state: _ConvertState, *, _toplevel: bool = False) -> str:
     """Walk a sequence of mwparserfromhell Nodes, emit WikiMark."""
     prev_output = state._node_output
     out: list[str] = []
@@ -238,8 +240,8 @@ def _convert_nodes(nodes: Any, state: _ConvertState) -> str:
 
     result = "".join(out)
 
-    # Append footnotes at the bottom if any exist
-    if state.footnotes:
+    # Footnotes only at the top-level call (not inside template params)
+    if _toplevel and state.footnotes:
         result += "\n\n" + "\n".join(state.footnotes) + "\n"
 
     return result
@@ -584,13 +586,15 @@ def _convert_template(node: Any, state: _ConvertState) -> str:
         args[k] = value
 
     if mapping is None:
-        # Try expanding from the template library (simple wikitext templates)
         lib_name = name.strip().replace("_", " ")
         if lib_name and lib_name[0].islower():
             lib_name = lib_name[0].upper() + lib_name[1:]
-        if lib_name in state.template_library:
+        if lib_name in state.template_library and state._template_depth < state._max_template_depth:
+            state._template_depth += 1
             expanded = _expand_template(state.template_library[lib_name], args)
-            return _convert_expanded_template(expanded, state)
+            result = _convert_expanded_template(expanded, state)
+            state._template_depth -= 1
+            return result
 
         state.report.add("unknown-template", state.title, name)
         normalized = _kebabize(name)

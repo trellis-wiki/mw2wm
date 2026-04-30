@@ -199,6 +199,7 @@ class _ConvertState:
     _list_depth: int = 0
     _list_type: str = ""
     template_library: dict[str, str] = field(default_factory=dict)
+    _node_output: list[str] | None = None
     _pending_semantic: list[tuple[str, str]] | None = None
 
     def add_category(self, name: str) -> None:
@@ -228,9 +229,12 @@ class _ConvertState:
 
 def _convert_nodes(nodes: Any, state: _ConvertState) -> str:
     """Walk a sequence of mwparserfromhell Nodes, emit WikiMark."""
+    prev_output = state._node_output
     out: list[str] = []
+    state._node_output = out
     for node in nodes:
         out.append(_convert_node(node, state))
+    state._node_output = prev_output
 
     result = "".join(out)
 
@@ -605,26 +609,21 @@ def _convert_template(node: Any, state: _ConvertState) -> str:
 
 
 def _convert_expanded_template(expanded: str, state: _ConvertState) -> str:
-    """Convert an expanded template body (raw wikitext) through the pipeline.
-
-    If a #subobject stored semantic properties on the state, wraps
-    the visible content in a WikiMark semantic annotation.
-    """
-    state._pending_semantic = None
+    """Convert an expanded template body (raw wikitext) through the pipeline."""
     text = expanded.strip()
     if not text:
         return ""
+    state._pending_semantic = None
     parsed = mwp.parse(text)
     result = _convert_nodes(parsed.nodes, state)
 
+    # Forward attachment: #subobject appeared before visible content
     if state._pending_semantic:
         props = state._pending_semantic
         state._pending_semantic = None
         visible = result.strip()
         if visible:
-            annotation_parts = []
-            for key, val in props:
-                annotation_parts.append(f'{key}="{val}"')
+            annotation_parts = [f'{k}="{v}"' for k, v in props]
             annotation = " ".join(annotation_parts)
             return f"[{visible}]|{annotation}|"
 
@@ -694,19 +693,35 @@ def _eval_parser_function(node: Any, name: str, state: _ConvertState) -> str:
     if func == "#ifexist":
         return _param(0)
 
-    # {{#subobject:|prop=val|...}} — Semantic MediaWiki metadata.
-    # Store on state; _convert_expanded_template wraps the visible
-    # content in a WikiMark semantic annotation.
+    # {{#subobject:name|prop=val|...}} — Semantic MediaWiki entity.
+    # Attaches as a WikiMark annotation to adjacent visible text.
     if func == "#subobject":
         props = []
+        subobj_id = condition.strip() if condition.strip() else None
+        if subobj_id:
+            props.append(("_id", subobj_id))
         for param in node.params:
             if param.showkey:
                 key = str(param.name).strip()
                 val = str(param.value).strip()
                 if key and val:
                     props.append((key, val))
-        if props:
-            state._pending_semantic = props
+        if not props:
+            return ""
+
+        annotation_parts = [f'{k}="{v}"' for k, v in props]
+        annotation = " ".join(annotation_parts)
+
+        # Try backward: wrap the last non-empty output
+        if state._node_output:
+            for i in range(len(state._node_output) - 1, -1, -1):
+                text = state._node_output[i].strip()
+                if text:
+                    state._node_output[i] = f"[{text}]|{annotation}|"
+                    return ""
+
+        # Nothing behind us — store for forward attachment
+        state._pending_semantic = props
         return ""
 
     # {{#invoke:Module|function|args}} — Lua, can't auto-convert

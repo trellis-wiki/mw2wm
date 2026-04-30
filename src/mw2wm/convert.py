@@ -547,6 +547,10 @@ def _convert_template(node: Any, state: _ConvertState) -> str:
     """
     name = str(node.name).strip()
 
+    # Parser functions — evaluate during conversion
+    if name.startswith("#"):
+        return _eval_parser_function(node, name, state)
+
     # Magic-word-style prefixes embedded as templates
     if ":" in name:
         prefix, _, value = name.partition(":")
@@ -554,12 +558,10 @@ def _convert_template(node: Any, state: _ConvertState) -> str:
         if prefix in _MAGIC_PREFIX_MAP:
             state.set_fm(_MAGIC_PREFIX_MAP[prefix], value.strip())
             return ""
-        # Things like {{Fullurl:Category:X}} — drop with report entry
         if prefix.lower() in ("fullurl", "ns", "urlencode", "anchorencode",
                               "uc", "lc", "ucfirst", "lcfirst", "plural",
                               "grammar", "formatnum"):
             state.report.add("parser-magic", state.title, prefix)
-            # Fall back to the first positional arg (MediaWiki is 1-indexed)
             return str(node.params[0].value) if node.params else ""
 
     mapping = tpl.lookup(name)
@@ -601,25 +603,107 @@ def _convert_template(node: Any, state: _ConvertState) -> str:
     return _emit_template_call(mapping.target, converted_args)
 
 
-_PARSER_FUNC_RE = re.compile(
-    r"\{\{#\w+:[^}]*\}\}", re.DOTALL
-)
-
-
 def _convert_expanded_template(expanded: str, state: _ConvertState) -> str:
-    """Convert an expanded template body (raw wikitext) through the pipeline.
-
-    Strips parser functions ({{#subobject:}}, {{#if:}}, etc.) that
-    have no WikiMark equivalent, then converts the remaining wikitext.
-    """
-    # Strip parser functions we can't handle
-    text = _PARSER_FUNC_RE.sub("", expanded)
-    text = text.strip()
+    """Convert an expanded template body (raw wikitext) through the pipeline."""
+    text = expanded.strip()
     if not text:
         return ""
-
     parsed = mwp.parse(text)
     return _convert_nodes(parsed.nodes, state)
+
+
+def _eval_parser_function(node: Any, name: str, state: _ConvertState) -> str:
+    """Evaluate a MediaWiki parser function during conversion.
+
+    Handles #if, #ifeq, #switch, #subobject, #invoke, and others.
+    Parser functions that are pure logic (#if, #switch) are evaluated
+    to their result. Semantic functions (#subobject) convert to
+    WikiMark annotations. Unknown functions are reported.
+    """
+    func, _, condition = name.partition(":")
+    func = func.strip().lower()
+    condition = condition.strip()
+
+    def _param(idx: int) -> str:
+        """Get positional param value, converting child nodes."""
+        params = list(node.params)
+        if idx < len(params):
+            return _convert_nodes(params[idx].value.nodes, state).strip()
+        return ""
+
+    def _raw_param(idx: int) -> str:
+        """Get raw param value without conversion."""
+        params = list(node.params)
+        if idx < len(params):
+            return str(params[idx].value).strip()
+        return ""
+
+    # {{#if:condition|then|else}} — non-empty condition = truthy
+    if func == "#if":
+        cond = _convert_nodes(mwp.parse(condition).nodes, state).strip()
+        if cond:
+            return _param(0)
+        return _param(1)
+
+    # {{#ifeq:a|b|then|else}} — string equality
+    if func == "#ifeq":
+        cond = _convert_nodes(mwp.parse(condition).nodes, state).strip()
+        comparand = _param(0)
+        if cond == comparand:
+            return _param(1)
+        return _param(2)
+
+    # {{#switch:value|case1=result|case2=result|#default=fallback}}
+    if func == "#switch":
+        value = _convert_nodes(mwp.parse(condition).nodes, state).strip()
+        default = ""
+        for param in node.params:
+            key = str(param.name).strip()
+            if param.showkey:
+                if key == "#default":
+                    default = _convert_nodes(param.value.nodes, state).strip()
+                elif key == value:
+                    return _convert_nodes(param.value.nodes, state).strip()
+            else:
+                # Positional param in switch = value match without key
+                val = str(param.value).strip()
+                if val == value:
+                    return val
+        return default
+
+    # {{#ifexist:page|then|else}} — can't check at conversion time
+    if func == "#ifexist":
+        return _param(0)
+
+    # {{#subobject:|prop=val|...}} — Semantic MediaWiki → WikiMark annotation
+    if func == "#subobject":
+        props = []
+        for param in node.params:
+            if param.showkey:
+                key = str(param.name).strip()
+                val = _convert_nodes(param.value.nodes, state).strip()
+                if key and val:
+                    props.append(f'{key}="{val}"')
+        # Emit nothing visible — the annotation should be attached
+        # to adjacent content by the caller. Store as HTML data attrs.
+        if props:
+            attrs = " ".join(props)
+            return f'<span class="wm-semantic" data-wm-props="{attrs}" hidden></span>'
+        return ""
+
+    # {{#invoke:Module|function|args}} — Lua, can't auto-convert
+    if func == "#invoke":
+        state.report.add("lua-invoke", state.title, condition)
+        return ""
+
+    # {{#ask:...}} — Semantic MediaWiki query
+    if func == "#ask":
+        state.report.add("smw-query", state.title, "#ask")
+        return ""
+
+    # Unknown parser function
+    state.report.add("parser-function", state.title, func)
+    return ""
 
 
 def _kebabize(name: str) -> str:

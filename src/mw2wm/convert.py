@@ -675,20 +675,9 @@ def _eval_parser_function(node: Any, name: str, state: _ConvertState) -> str:
     if func == "#ifexist":
         return _param(0)
 
-    # {{#subobject:|prop=val|...}} — Semantic MediaWiki → WikiMark annotation
+    # {{#subobject:|prop=val|...}} — Semantic MediaWiki metadata store.
+    # No visible output; semantic data is MW-specific infrastructure.
     if func == "#subobject":
-        props = []
-        for param in node.params:
-            if param.showkey:
-                key = str(param.name).strip()
-                val = _convert_nodes(param.value.nodes, state).strip()
-                if key and val:
-                    props.append(f'{key}="{val}"')
-        # Emit nothing visible — the annotation should be attached
-        # to adjacent content by the caller. Store as HTML data attrs.
-        if props:
-            attrs = " ".join(props)
-            return f'<span class="wm-semantic" data-wm-props="{attrs}" hidden></span>'
         return ""
 
     # {{#invoke:Module|function|args}} — Lua, can't auto-convert

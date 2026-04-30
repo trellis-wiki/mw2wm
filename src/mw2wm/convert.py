@@ -199,6 +199,7 @@ class _ConvertState:
     _list_depth: int = 0
     _list_type: str = ""
     template_library: dict[str, str] = field(default_factory=dict)
+    _pending_semantic: list[tuple[str, str]] | None = None
 
     def add_category(self, name: str) -> None:
         self.frontmatter.setdefault("categories", []).append(name)
@@ -604,12 +605,30 @@ def _convert_template(node: Any, state: _ConvertState) -> str:
 
 
 def _convert_expanded_template(expanded: str, state: _ConvertState) -> str:
-    """Convert an expanded template body (raw wikitext) through the pipeline."""
+    """Convert an expanded template body (raw wikitext) through the pipeline.
+
+    If a #subobject stored semantic properties on the state, wraps
+    the visible content in a WikiMark semantic annotation.
+    """
+    state._pending_semantic = None
     text = expanded.strip()
     if not text:
         return ""
     parsed = mwp.parse(text)
-    return _convert_nodes(parsed.nodes, state)
+    result = _convert_nodes(parsed.nodes, state)
+
+    if state._pending_semantic:
+        props = state._pending_semantic
+        state._pending_semantic = None
+        visible = result.strip()
+        if visible:
+            annotation_parts = []
+            for key, val in props:
+                annotation_parts.append(f'{key}="{val}"')
+            annotation = " ".join(annotation_parts)
+            return f"[{visible}]|{annotation}|"
+
+    return result
 
 
 def _eval_parser_function(node: Any, name: str, state: _ConvertState) -> str:
@@ -675,9 +694,19 @@ def _eval_parser_function(node: Any, name: str, state: _ConvertState) -> str:
     if func == "#ifexist":
         return _param(0)
 
-    # {{#subobject:|prop=val|...}} — Semantic MediaWiki metadata store.
-    # No visible output; semantic data is MW-specific infrastructure.
+    # {{#subobject:|prop=val|...}} — Semantic MediaWiki metadata.
+    # Store on state; _convert_expanded_template wraps the visible
+    # content in a WikiMark semantic annotation.
     if func == "#subobject":
+        props = []
+        for param in node.params:
+            if param.showkey:
+                key = str(param.name).strip()
+                val = str(param.value).strip()
+                if key and val:
+                    props.append((key, val))
+        if props:
+            state._pending_semantic = props
         return ""
 
     # {{#invoke:Module|function|args}} — Lua, can't auto-convert

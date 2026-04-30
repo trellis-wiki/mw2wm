@@ -419,7 +419,7 @@ def _convert_file_link(node: Any, state: _ConvertState) -> str:
     if align:
         attrs.append(f"align={align}")
 
-    href = filename.replace(" ", "_")
+    href = "/assets/" + filename.replace(" ", "_")
     attr_block = " ".join(attrs)
     attr_str = f"{{{attr_block}}}" if attr_block else ""
     return f"![{alt}]({href}){attr_str}"

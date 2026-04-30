@@ -1,36 +1,80 @@
 """
 MediaWiki template call → WikiMark template call.
 
-The actively-used templates from a typical MediaWiki survey (see
-``mw2wm/SURVEY.md``) map one-to-one to Trellis built-in modules.
-For each known template we record:
+Built-in mappings cover common templates (infoboxes, hatnotes, etc.).
+Wiki-specific templates are handled via a plugin system:
 
-- The target module name (what appears in the WikiMark output)
-- A positional-arg name map (MediaWiki templates often take
-  numbered positional args; WikiMark + the built-in modules want
-  named kwargs)
-- An optional filter that drops unwanted keys or renames fields
+1. **YAML mappings** — ``templates.yaml`` in the input directory for
+   simple name/arg remapping (most common case).
+2. **Python plugins** — ``templates/*.py`` in the input directory for
+   templates that need custom conversion logic.
+
+YAML format::
+
+    My Template:
+      target: my-module
+      positional:
+        "1": title
+        "2": date
+      rename:
+        old_field: new_field
+      drop:
+        - unwanted_key
+
+    Decoration Only:
+      target: null  # drop entirely
+
+Python plugin format::
+
+    # templates/my_complex_template.py
+    from mw2wm.templates import TemplateMapping
+
+    TEMPLATES = {
+        "Complex Template": TemplateMapping(
+            target="complex-module",
+            positional={"1": "name"},
+        ),
+    }
+
+    # Or for full control, define a convert function:
+    def convert_complex(args):
+        name = args.get("1", "")
+        return {"target": "complex-module", "name": name.upper()}
 """
 
 from __future__ import annotations
 
+import importlib.util
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable
+
+import yaml
+
+logger = logging.getLogger("mw2wm.templates")
 
 
 @dataclass
 class TemplateMapping:
     """How to convert one MediaWiki template to a WikiMark call."""
 
-    target: str | None  # None = drop entirely (handled elsewhere or no-op)
+    target: str | None
     positional: dict[str, str] = field(default_factory=dict)
     rename: dict[str, str] = field(default_factory=dict)
     drop_keys: set[str] = field(default_factory=set)
+    convert_fn: Callable[[dict[str, str]], dict[str, str]] | None = None
 
     def apply(self, args: Mapping[str, str]) -> dict[str, str]:
-        """Apply positional renaming + field renaming + drops.
-        Returns a new dict of args ready for WikiMark emission.
-        """
+        if self.convert_fn is not None:
+            result = self.convert_fn(dict(args))
+            if isinstance(result, dict):
+                target = result.pop("target", self.target)
+                if target is not None:
+                    self.target = target
+                return result
+
         out: dict[str, str] = {}
         for key, value in args.items():
             if key in self.drop_keys:
@@ -40,32 +84,24 @@ class TemplateMapping:
         return out
 
 
-# Mapping of MediaWiki template names (canonical first-letter-upper form)
-# to their WikiMark built-in equivalents. Anything not here is treated
-# as unknown and logged to the conversion report.
 TEMPLATE_MAPPINGS: dict[str, TemplateMapping] = {
-    # Navigation
     "Hatnote": TemplateMapping(
         target="hatnote",
         positional={"1": "text"},
     ),
-    # Common in worldbuilding wikis
     "Timeline event": TemplateMapping(
         target="timeline-event",
         positional={"1": "label", "2": "date"},
     ),
-    # Personal data
     "Birth date and age": TemplateMapping(
         target="birth-date-and-age",
         positional={"1": "year", "2": "month", "3": "day"},
     ),
-    # Infoboxes — positional args uncommon; mostly named
     "Infobox officeholder": TemplateMapping(target="infobox-officeholder"),
     "Infobox settlement": TemplateMapping(target="infobox-settlement"),
     "Infobox country": TemplateMapping(target="infobox-country"),
     "Infobox person": TemplateMapping(target="infobox-person"),
     "Infobox": TemplateMapping(target="infobox"),
-    # Formatting
     "Lang": TemplateMapping(
         target="lang",
         positional={"1": "code", "2": "text"},
@@ -86,23 +122,129 @@ TEMPLATE_MAPPINGS: dict[str, TemplateMapping] = {
         target="tl",
         positional={"1": "name"},
     ),
-    # Metadata-only — handled via frontmatter elsewhere; call site drops
     "Italic title": TemplateMapping(target=None),
 }
 
+FRONTMATTER_TEMPLATES = {"Italic title"}
 
-def lookup(name: str) -> TemplateMapping | None:
-    """Look up a template by its MediaWiki-canonical name.
+# ── Plugin registry ────────────────────────────────────────────
 
-    Handles the first-letter-uppercase + spaces (not underscores)
-    convention MediaWiki canonicalizes template calls to.
-    """
+_custom_mappings: dict[str, TemplateMapping] = {}
+
+
+def _normalize_name(name: str) -> str:
     normalized = name.strip().replace("_", " ")
     if normalized:
         normalized = normalized[0].upper() + normalized[1:]
-    return TEMPLATE_MAPPINGS.get(normalized)
+    return normalized
 
 
-# Template names whose entire call should be silently dropped
-# from the output (handled via frontmatter instead of inline).
-FRONTMATTER_TEMPLATES = {"Italic title"}
+def lookup(name: str) -> TemplateMapping | None:
+    normalized = _normalize_name(name)
+    return _custom_mappings.get(normalized) or TEMPLATE_MAPPINGS.get(normalized)
+
+
+def load_plugins(input_dir: Path) -> int:
+    """Load template plugins from the input directory.
+
+    Looks for:
+    - ``<input_dir>/templates.yaml`` — YAML mappings
+    - ``<input_dir>/templates/*.py`` — Python plugin files
+
+    Returns the number of custom mappings loaded.
+    """
+    count = 0
+
+    yaml_file = input_dir / "templates.yaml"
+    if yaml_file.is_file():
+        count += _load_yaml(yaml_file)
+
+    plugins_dir = input_dir / "templates"
+    if plugins_dir.is_dir():
+        for py_file in sorted(plugins_dir.glob("*.py")):
+            count += _load_python_plugin(py_file)
+
+    if count:
+        logger.info("Loaded %d custom template mappings", count)
+    return count
+
+
+def _load_yaml(path: Path) -> int:
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        logger.warning("templates.yaml: expected dict, got %s", type(data).__name__)
+        return 0
+
+    count = 0
+    for name, spec in data.items():
+        normalized = _normalize_name(str(name))
+        if isinstance(spec, dict):
+            target = spec.get("target")
+            mapping = TemplateMapping(
+                target=target,
+                positional={str(k): str(v) for k, v in spec.get("positional", {}).items()},
+                rename={str(k): str(v) for k, v in spec.get("rename", {}).items()},
+                drop_keys=set(str(k) for k in spec.get("drop", [])),
+            )
+        elif spec is None:
+            mapping = TemplateMapping(target=None)
+        else:
+            logger.warning("templates.yaml: skipping %r (unexpected value type)", name)
+            continue
+
+        _custom_mappings[normalized] = mapping
+        count += 1
+        logger.debug("YAML: loaded %r → %s", normalized, mapping.target)
+
+    return count
+
+
+def _load_python_plugin(path: Path) -> int:
+    module_name = f"mw2wm_plugin_{path.stem}"
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        logger.warning("Could not load plugin: %s", path)
+        return 0
+
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as e:
+        logger.warning("Plugin %s failed to load: %s", path.name, e)
+        return 0
+
+    count = 0
+
+    # Look for TEMPLATES dict
+    templates = getattr(module, "TEMPLATES", {})
+    if isinstance(templates, dict):
+        for name, mapping in templates.items():
+            normalized = _normalize_name(str(name))
+            if isinstance(mapping, TemplateMapping):
+                _custom_mappings[normalized] = mapping
+                count += 1
+            elif isinstance(mapping, dict):
+                _custom_mappings[normalized] = TemplateMapping(**mapping)
+                count += 1
+            logger.debug("Plugin %s: loaded %r", path.name, normalized)
+
+    # Look for convert_* functions
+    for attr_name in dir(module):
+        if attr_name.startswith("convert_"):
+            fn = getattr(module, attr_name)
+            if callable(fn):
+                template_name = attr_name[len("convert_"):].replace("_", " ")
+                normalized = _normalize_name(template_name)
+                if normalized not in _custom_mappings:
+                    _custom_mappings[normalized] = TemplateMapping(
+                        target=None, convert_fn=fn
+                    )
+                    count += 1
+                    logger.debug("Plugin %s: loaded converter %r", path.name, normalized)
+
+    return count
+
+
+def reset_plugins():
+    """Clear all custom mappings (useful for testing)."""
+    _custom_mappings.clear()

@@ -20,6 +20,7 @@ from pathlib import Path
 
 from . import convert_page
 from .report import Report
+from .templates import load_plugins, reset_plugins
 
 
 def build(input_dir: Path, output_dir: Path) -> int:
@@ -30,6 +31,12 @@ def build(input_dir: Path, output_dir: Path) -> int:
 
     pages_dst = output_dir / "pages"
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load wiki-specific template plugins
+    reset_plugins()
+    plugin_count = load_plugins(input_dir)
+    if plugin_count:
+        print(f"Loaded {plugin_count} custom template mappings")
 
     report = Report()
     converted = 0

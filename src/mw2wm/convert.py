@@ -359,14 +359,30 @@ _FILE_ALIGN_RE = re.compile(r"^(?:left|right|center|centre|none)$",
                             re.IGNORECASE)
 
 
-def _strip_markup_for_alt(text: str) -> str:
-    """Strip wiki/markdown markup to plain text for image alt attributes."""
+def _caption_to_plain(text: str) -> str:
+    """Flatten wiki/markdown markup to plain text for alt attributes."""
     text = re.sub(r"\[\[([^|\]]+)\|([^\]]+)\]\]", r"\2", text)
     text = re.sub(r"\[\[([^\]]+)\]\]", r"\1", text)
     text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
     text = re.sub(r"[*_`]", "", text)
-    text = re.sub(r"\s+", " ", text).strip()
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _caption_to_html(text: str) -> str:
+    """Convert wiki links in a caption to HTML <a> tags."""
+    from html import escape as h
+    def _link(m: re.Match) -> str:
+        target = m.group(1).strip()
+        display = m.group(2).strip() if m.lastindex == 2 else target
+        href = target.replace(" ", "_")
+        return f'<a href="{h(href)}">{h(display)}</a>'
+
+    text = re.sub(r"\[\[([^|\]]+)\|([^\]]+)\]\]", _link, text)
+    text = re.sub(r"\[\[([^\]]+)\]\]", _link, text)
     return text
+
+
+_WIKI_LINK_IN_TEXT = re.compile(r"\[\[")
 
 
 def _convert_file_link(node: Any, state: _ConvertState) -> str:
@@ -380,12 +396,6 @@ def _convert_file_link(node: Any, state: _ConvertState) -> str:
     align: str | None = None
     caption = ""
 
-    # mwparserfromhell's Wikilink.text is the pipe-joined params
-    # concatenated; we need the individual params. The library exposes
-    # them via iteration if we reparse — easier to grab them from the
-    # .params list when the node type is a Template-like wikilink.
-    # For wikilinks, `.text` holds everything after the first `|`.
-    # Split on pipe, but respect nested templates/links.
     if node.text:
         parts = _split_params(str(node.text))
         for part in parts:
@@ -402,13 +412,37 @@ def _convert_file_link(node: Any, state: _ConvertState) -> str:
                     height = m.group(2)
             elif part.startswith(("link=", "alt=", "page=", "class=", "lang=",
                                    "upright", "upright=")):
-                # Drop advanced options for v0.1; log for review
                 state.report.add("file-option-dropped", state.title, part)
             else:
-                # Whatever's left is the caption
                 caption = part
 
-    alt = _strip_markup_for_alt(caption) if caption else filename
+    href = filename.replace(" ", "_")
+
+    # cmark-gfm truncates image descriptions at any inline markup.
+    # For captions with wiki links, emit raw HTML so links are preserved.
+    if caption and _WIKI_LINK_IN_TEXT.search(caption):
+        from html import escape as h
+        alt_text = _caption_to_plain(caption)
+        caption_html = _caption_to_html(caption)
+        cls_list = ["wm-figure"] + [f"wm-{c}" for c in classes]
+        if align:
+            cls_list.append(f"wm-align-{align}")
+        cls = " ".join(cls_list)
+        style_parts = []
+        if width:
+            style_parts.append(f"max-width:{width}px")
+        style = f' style="{";".join(style_parts)}"' if style_parts else ""
+        img_attrs = f' width="{width}"' if width else ""
+        if height:
+            img_attrs += f' height="{height}"'
+        return (
+            f'\n<figure class="{h(cls)}"{style}>'
+            f'<img src="{h(href)}" alt="{h(alt_text)}"{img_attrs} />'
+            f'<figcaption>{caption_html}</figcaption>'
+            f'</figure>\n'
+        )
+
+    alt = _caption_to_plain(caption) if caption else filename
     attrs = []
     if classes:
         attrs.extend(f".{c}" for c in classes)
@@ -419,7 +453,6 @@ def _convert_file_link(node: Any, state: _ConvertState) -> str:
     if align:
         attrs.append(f"align={align}")
 
-    href = "/assets/" + filename.replace(" ", "_")
     attr_block = " ".join(attrs)
     attr_str = f"{{{attr_block}}}" if attr_block else ""
     return f"![{alt}]({href}){attr_str}"

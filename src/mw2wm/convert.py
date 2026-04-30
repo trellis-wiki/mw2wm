@@ -527,9 +527,13 @@ def _convert_template(node: Any, state: _ConvertState) -> str:
         normalized = _kebabize(name)
         return _emit_template_call(normalized, args)
 
-    if mapping.target is None:
-        # Handled via frontmatter or intentionally dropped
+    if mapping.target is None and mapping.inline is None:
         return ""
+
+    # Inline rendering — emit plain text instead of a template call
+    inline_result = mapping.render_inline(args)
+    if inline_result is not None:
+        return inline_result
 
     converted_args = mapping.apply(args)
     return _emit_template_call(mapping.target, converted_args)

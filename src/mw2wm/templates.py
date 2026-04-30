@@ -58,13 +58,22 @@ logger = logging.getLogger("mw2wm.templates")
 
 @dataclass
 class TemplateMapping:
-    """How to convert one MediaWiki template to a WikiMark call."""
+    """How to convert one MediaWiki template to a WikiMark call.
+
+    Set ``target`` to a module name for ``{{target args}}``, or
+    ``None`` to drop the template entirely.
+
+    Set ``inline`` to a format string (e.g. ``"{2}"``) to emit
+    plain text instead of a template call. Positional args are
+    available as ``{1}``, ``{2}``, etc.; named args as ``{name}``.
+    """
 
     target: str | None
     positional: dict[str, str] = field(default_factory=dict)
     rename: dict[str, str] = field(default_factory=dict)
     drop_keys: set[str] = field(default_factory=set)
     convert_fn: Callable[[dict[str, str]], dict[str, str]] | None = None
+    inline: str | None = None
 
     def apply(self, args: Mapping[str, str]) -> dict[str, str]:
         if self.convert_fn is not None:
@@ -83,24 +92,34 @@ class TemplateMapping:
             out[new_key] = value
         return out
 
+    def render_inline(self, args: Mapping[str, str]) -> str | None:
+        """If this mapping has an inline format, render it. Returns
+        None if no inline format is set.
+
+        Uses ``$1``, ``$2`` for positional args and ``$name`` for
+        named args (dollar-sign prefix avoids Python format conflicts).
+        """
+        if self.inline is None:
+            return None
+        result = self.inline
+        for key, value in args.items():
+            result = result.replace(f"${key}", value)
+        return result
+
 
 TEMPLATE_MAPPINGS: dict[str, TemplateMapping] = {
     "Hatnote": TemplateMapping(
         target="hatnote",
         positional={"1": "text"},
     ),
-    "Timeline event": TemplateMapping(
-        target="timeline-event",
-        positional={"1": "label", "2": "date"},
-    ),
     "Birth date and age": TemplateMapping(
         target="birth-date-and-age",
         positional={"1": "year", "2": "month", "3": "day"},
     ),
-    "Infobox officeholder": TemplateMapping(target="infobox-officeholder"),
-    "Infobox settlement": TemplateMapping(target="infobox-settlement"),
-    "Infobox country": TemplateMapping(target="infobox-country"),
-    "Infobox person": TemplateMapping(target="infobox-person"),
+    "Infobox officeholder": TemplateMapping(target="infobox"),
+    "Infobox settlement": TemplateMapping(target="infobox"),
+    "Infobox country": TemplateMapping(target="infobox"),
+    "Infobox person": TemplateMapping(target="infobox"),
     "Infobox": TemplateMapping(target="infobox"),
     "Lang": TemplateMapping(
         target="lang",
@@ -180,11 +199,13 @@ def _load_yaml(path: Path) -> int:
         normalized = _normalize_name(str(name))
         if isinstance(spec, dict):
             target = spec.get("target")
+            inline = spec.get("inline")
             mapping = TemplateMapping(
                 target=target,
                 positional={str(k): str(v) for k, v in spec.get("positional", {}).items()},
                 rename={str(k): str(v) for k, v in spec.get("rename", {}).items()},
                 drop_keys=set(str(k) for k in spec.get("drop", [])),
+                inline=inline,
             )
         elif spec is None:
             mapping = TemplateMapping(target=None)

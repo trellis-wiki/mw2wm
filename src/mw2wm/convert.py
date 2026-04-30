@@ -359,6 +359,16 @@ _FILE_ALIGN_RE = re.compile(r"^(?:left|right|center|centre|none)$",
                             re.IGNORECASE)
 
 
+def _strip_markup_for_alt(text: str) -> str:
+    """Strip wiki/markdown markup to plain text for image alt attributes."""
+    text = re.sub(r"\[\[([^|\]]+)\|([^\]]+)\]\]", r"\2", text)
+    text = re.sub(r"\[\[([^\]]+)\]\]", r"\1", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"[*_`]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
 def _convert_file_link(node: Any, state: _ConvertState) -> str:
     """Convert ``[[File:X.jpg|thumb|200px|caption]]`` to WikiMark image."""
     target = str(node.title).strip()
@@ -398,7 +408,7 @@ def _convert_file_link(node: Any, state: _ConvertState) -> str:
                 # Whatever's left is the caption
                 caption = part
 
-    alt = caption or filename
+    alt = _strip_markup_for_alt(caption) if caption else filename
     attrs = []
     if classes:
         attrs.extend(f".{c}" for c in classes)
@@ -409,9 +419,10 @@ def _convert_file_link(node: Any, state: _ConvertState) -> str:
     if align:
         attrs.append(f"align={align}")
 
+    href = filename.replace(" ", "_")
     attr_block = " ".join(attrs)
     attr_str = f"{{{attr_block}}}" if attr_block else ""
-    return f"![{alt}]({filename}){attr_str}"
+    return f"![{alt}]({href}){attr_str}"
 
 
 def _split_params(s: str) -> list[str]:

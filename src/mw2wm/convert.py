@@ -79,6 +79,7 @@ def convert_page(
     *,
     title: str = "",
     report: Report | None = None,
+    template_library: dict[str, str] | None = None,
 ) -> ConvertedPage:
     """Convert a single MediaWiki page to a ConvertedPage result.
 
@@ -87,9 +88,14 @@ def convert_page(
         title: Page title (used only for report attribution).
         report: Accumulator for unhandled constructs. A new Report is
             created and discarded if None (useful for tests).
+        template_library: Dict of template name → body text for
+            expanding simple templates during conversion.
     """
     report = report or Report()
-    state = _ConvertState(title=title, report=report)
+    state = _ConvertState(
+        title=title, report=report,
+        template_library=template_library or {},
+    )
 
     # Check for #REDIRECT before parsing — it must be at the top of
     # the file and is simple enough to handle without mwparserfromhell.
@@ -134,6 +140,55 @@ def convert_text(wikitext: str, *, title: str = "") -> str:
 # ---------------------------------------------------------------------------
 
 
+_INCLUDEONLY_RE = re.compile(
+    r"<includeonly>(.*?)</includeonly>", re.DOTALL | re.IGNORECASE
+)
+_NOINCLUDE_RE = re.compile(
+    r"<noinclude>.*?</noinclude>", re.DOTALL | re.IGNORECASE
+)
+_TEMPLATE_ARG_RE_MW = re.compile(r"\{\{\{([^}|]+)(?:\|([^}]*))?\}\}\}")
+
+
+def _build_template_library(pages_dir: Path) -> dict[str, str]:
+    """Build a template expansion library from Template/*.wikitext files.
+
+    Returns a dict of normalized template name → expandable body text.
+    Only includes templates with <includeonly> content (the part that
+    MediaWiki actually transcludes). Falls back to full content minus
+    <noinclude> if no <includeonly> tags.
+    """
+    tpl_dir = pages_dir / "Template"
+    if not tpl_dir.is_dir():
+        return {}
+
+    library: dict[str, str] = {}
+    for f in tpl_dir.glob("*.wikitext"):
+        name = f.stem.replace("_", " ")
+        content = f.read_text(encoding="utf-8")
+
+        # Extract <includeonly> content if present
+        m = _INCLUDEONLY_RE.search(content)
+        if m:
+            body = m.group(1)
+        else:
+            # No <includeonly> — use everything minus <noinclude> blocks
+            body = _NOINCLUDE_RE.sub("", content).strip()
+
+        if body:
+            library[name] = body
+
+    return library
+
+
+def _expand_template(body: str, args: dict[str, str]) -> str:
+    """Substitute {{{1}}}, {{{name}}}, {{{name|default}}} in a template body."""
+    def _replace_arg(m: re.Match) -> str:
+        key = m.group(1).strip()
+        default = m.group(2) if m.group(2) is not None else ""
+        return args.get(key, default)
+    return _TEMPLATE_ARG_RE_MW.sub(_replace_arg, body)
+
+
 @dataclass
 class _ConvertState:
     title: str
@@ -143,6 +198,7 @@ class _ConvertState:
     named_footnotes: dict[str, int] = field(default_factory=dict)
     _list_depth: int = 0
     _list_type: str = ""
+    template_library: dict[str, str] = field(default_factory=dict)
 
     def add_category(self, name: str) -> None:
         self.frontmatter.setdefault("categories", []).append(name)
@@ -521,9 +577,15 @@ def _convert_template(node: Any, state: _ConvertState) -> str:
         args[k] = value
 
     if mapping is None:
+        # Try expanding from the template library (simple wikitext templates)
+        lib_name = name.strip().replace("_", " ")
+        if lib_name and lib_name[0].islower():
+            lib_name = lib_name[0].upper() + lib_name[1:]
+        if lib_name in state.template_library:
+            expanded = _expand_template(state.template_library[lib_name], args)
+            return _convert_expanded_template(expanded, state)
+
         state.report.add("unknown-template", state.title, name)
-        # Emit a WikiMark template call with a kebab-case name so
-        # Trellis produces a visible error indicator.
         normalized = _kebabize(name)
         return _emit_template_call(normalized, args)
 
@@ -537,6 +599,27 @@ def _convert_template(node: Any, state: _ConvertState) -> str:
 
     converted_args = mapping.apply(args)
     return _emit_template_call(mapping.target, converted_args)
+
+
+_PARSER_FUNC_RE = re.compile(
+    r"\{\{#\w+:[^}]*\}\}", re.DOTALL
+)
+
+
+def _convert_expanded_template(expanded: str, state: _ConvertState) -> str:
+    """Convert an expanded template body (raw wikitext) through the pipeline.
+
+    Strips parser functions ({{#subobject:}}, {{#if:}}, etc.) that
+    have no WikiMark equivalent, then converts the remaining wikitext.
+    """
+    # Strip parser functions we can't handle
+    text = _PARSER_FUNC_RE.sub("", expanded)
+    text = text.strip()
+    if not text:
+        return ""
+
+    parsed = mwp.parse(text)
+    return _convert_nodes(parsed.nodes, state)
 
 
 def _kebabize(name: str) -> str:

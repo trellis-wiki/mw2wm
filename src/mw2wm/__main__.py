@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 from . import convert_page
+from .convert import _build_template_library
 from .report import Report
 from .templates import load_plugins, reset_plugins
 
@@ -32,11 +33,16 @@ def build(input_dir: Path, output_dir: Path) -> int:
     pages_dst = output_dir / "pages"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load wiki-specific template plugins
+    # Load wiki-specific template overrides (if any)
     reset_plugins()
     plugin_count = load_plugins(input_dir)
     if plugin_count:
         print(f"Loaded {plugin_count} custom template mappings")
+
+    # Build template expansion library from Template/*.wikitext
+    template_library = _build_template_library(pages_src)
+    if template_library:
+        print(f"Found {len(template_library)} wiki templates for expansion")
 
     report = Report()
     converted = 0
@@ -48,7 +54,8 @@ def build(input_dir: Path, output_dir: Path) -> int:
         title = rel.with_suffix("").as_posix().replace("/", " / ")
         try:
             wikitext = wikitext_file.read_text(encoding="utf-8")
-            page = convert_page(wikitext, title=title, report=report)
+            page = convert_page(wikitext, title=title, report=report,
+                               template_library=template_library)
         except Exception as e:  # noqa: BLE001
             errors += 1
             print(f"  error converting {rel}: {e}", file=sys.stderr)

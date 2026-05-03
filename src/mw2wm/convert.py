@@ -876,9 +876,9 @@ def _convert_tag(node: Any, state: _ConvertState) -> str:
         return _convert_syntaxhighlight(node, state)
 
     if tag == "poem":
-        # <poem> preserves line breaks; simplest preservation is to
-        # wrap in raw HTML since GFM strips line breaks inside paragraphs.
-        return str(node)
+        inner = _convert_nodes(node.contents.nodes, state) if node.contents else ""
+        lines = inner.strip().split("\n")
+        return "\n" + "\\\n".join(lines) + "\n"
 
     if tag == "math":
         # Preserve as raw HTML; Trellis can render with MathJax later.

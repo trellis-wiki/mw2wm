@@ -3,6 +3,9 @@ input/
 output/
 SURVEY.md
 
+# Test corpus — downloaded from external wikis
+tests/corpus/
+
 # Python
 __pycache__/
 *.py[cod]

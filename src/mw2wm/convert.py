@@ -945,7 +945,7 @@ def _extract_templatedata(node: Any, state: _ConvertState) -> None:
         schema[key] = entry
 
     if schema:
-        state.frontmatter["params"] = schema
+        state.frontmatter["inputs"] = schema
 
     desc = data.get("description")
     if desc and isinstance(desc, str):

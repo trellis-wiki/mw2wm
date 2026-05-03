@@ -118,6 +118,13 @@ def convert_page(
     body = re.sub(r"\n{3,}", "\n\n", body)
     body = body.strip() + "\n"
 
+    # Template pages with inputs get type: transclusion
+    is_template = (title.startswith("Template:") or
+                   title.startswith("Template /") or
+                   title.startswith("Template/"))
+    if is_template and "inputs" in state.frontmatter:
+        state.frontmatter.setdefault("type", "transclusion")
+
     result = ConvertedPage(frontmatter=state.frontmatter, body=body)
     # Dedupe category list (order-preserving)
     if "categories" in result.frontmatter:
@@ -302,10 +309,7 @@ def _convert_node(node: Any, state: _ConvertState) -> str:
     if isinstance(node, HTMLEntity):
         return prefix + str(node)
     if isinstance(node, Argument):
-        state.report.add(
-            "template-argument", state.title, str(node),
-        )
-        return prefix + str(node)
+        return prefix + _convert_argument(node, state)
     # Fallback: pass through raw text
     state.report.add("unknown-node-type", state.title, type(node).__name__)
     return prefix + str(node)
@@ -314,6 +318,34 @@ def _convert_node(node: Any, state: _ConvertState) -> str:
 # ---------------------------------------------------------------------------
 # Converters per node kind
 # ---------------------------------------------------------------------------
+
+
+def _convert_argument(node: Any, state: _ConvertState) -> str:
+    """Convert {{{arg}}} / {{{arg|default}}} to WikiMark ${arg} syntax.
+
+    On template pages, arguments become variable references. If a default
+    value is present, it's recorded in the inputs frontmatter block.
+    On non-template pages, arguments are passed through and reported.
+    """
+    name = str(node.name).strip()
+    default = node.default
+
+    is_template_page = (state.title.startswith("Template:") or
+                        state.title.startswith("Template /") or
+                        state.title.startswith("Template/"))
+
+    if not is_template_page:
+        state.report.add("template-argument", state.title, str(node))
+        return str(node)
+
+    if default is not None:
+        default_str = _convert_nodes(default.nodes, state).strip()
+        inputs = state.frontmatter.setdefault("inputs", {})
+        entry = inputs.setdefault(name, {})
+        if default_str and "default" not in entry:
+            entry["default"] = default_str
+
+    return f"${{{name}}}"
 
 
 # MediaWiki inline formatting → GFM
@@ -835,7 +867,7 @@ def _convert_tag(node: Any, state: _ConvertState) -> str:
                "sub", "sup", "small", "big", "code", "tt", "pre",
                "blockquote", "cite", "kbd", "samp", "var", "div", "span",
                "br", "hr", "p", "center", "dl", "dt", "dd", "ol", "ul", "li"):
-        return str(node)
+        return _passthrough_html_tag(node, state)
 
     if tag == "syntaxhighlight" or tag == "source":
         return _convert_syntaxhighlight(node, state)
@@ -881,6 +913,20 @@ def _convert_tag(node: Any, state: _ConvertState) -> str:
 _CATEGORY_RE = re.compile(
     r"\[\[Category:([^\]|]+)(?:\|[^\]]*)?\]\]", re.IGNORECASE
 )
+
+
+def _passthrough_html_tag(node: Any, state: _ConvertState) -> str:
+    """Pass through an HTML tag, but recurse into contents to convert
+    any child nodes (e.g. template arguments on template pages)."""
+    if node.self_closing or not node.contents:
+        return str(node)
+    from mwparserfromhell.nodes import Argument
+    if not any(isinstance(c, Argument) for c in node.contents.nodes):
+        return str(node)
+    attrs = str(node)[: str(node).index(">") + 1]
+    inner = _convert_nodes(node.contents.nodes, state)
+    tag = str(node.tag).lower()
+    return f"{attrs}{inner}</{tag}>"
 
 
 def _extract_noinclude_metadata(node: Any, state: _ConvertState) -> None:

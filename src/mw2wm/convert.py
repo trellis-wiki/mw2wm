@@ -976,14 +976,16 @@ def _extract_templatedata(node: Any, state: _ConvertState) -> None:
         if not isinstance(spec, dict):
             continue
         entry: dict[str, Any] = {}
-        if "description" in spec:
-            entry["description"] = spec["description"]
-        elif "label" in spec:
-            entry["description"] = spec["label"]
+        desc = spec.get("description") or spec.get("label", "")
+        example = spec.get("example")
+        if desc and example:
+            desc = f"{desc}. Example: \"{example}\""
+        elif not desc and example:
+            desc = f"Example: \"{example}\""
+        if desc:
+            entry["description"] = desc
         if "default" in spec:
             entry["default"] = spec["default"]
-        if spec.get("required"):
-            entry["required"] = True
         schema[key] = entry
 
     if schema:

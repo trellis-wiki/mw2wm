@@ -764,21 +764,16 @@ def _eval_parser_function(node: Any, name: str, state: _ConvertState) -> str:
     # {{#invoke:Module|function|args}} — Lua, can't auto-convert
     if func == "#invoke":
         state.report.add("lua-invoke", state.title, condition)
-        is_tpl = (state.title.startswith("Template:") or
-                  state.title.startswith("Template /") or
-                  state.title.startswith("Template/"))
-        if is_tpl:
-            return f"**This template requires module `{condition}` and cannot be converted automatically.**"
-        return ""
+        return f"**This template requires module `{condition}` and cannot be converted automatically.**"
 
     # {{#ask:...}} — Semantic MediaWiki query
     if func == "#ask":
         state.report.add("smw-query", state.title, "#ask")
-        return ""
+        return f"**SMW query (`#ask`) cannot be converted automatically.**"
 
     # Unknown parser function
     state.report.add("parser-function", state.title, func)
-    return ""
+    return f"**Unrecognized parser function `{func}` — not converted.**"
 
 
 def _kebabize(name: str) -> str:

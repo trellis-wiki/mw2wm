@@ -17,6 +17,7 @@ redirect targets all flow into frontmatter.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -858,9 +859,97 @@ def _convert_tag(node: Any, state: _ConvertState) -> str:
             f'<div class="wm-dpl-placeholder">{content}</div>\n\n'
         )
 
+    if tag == "includeonly":
+        return _convert_nodes(node.contents.nodes, state) if node.contents else ""
+
+    if tag == "noinclude":
+        _extract_noinclude_metadata(node, state)
+        return ""
+
+    if tag == "onlyinclude":
+        return _convert_nodes(node.contents.nodes, state) if node.contents else ""
+
+    if tag == "templatedata":
+        _extract_templatedata(node, state)
+        return ""
+
     # Unknown tag — pass through raw and report
     state.report.add("unknown-tag", state.title, tag)
     return str(node)
+
+
+_CATEGORY_RE = re.compile(
+    r"\[\[Category:([^\]|]+)(?:\|[^\]]*)?\]\]", re.IGNORECASE
+)
+
+
+def _extract_noinclude_metadata(node: Any, state: _ConvertState) -> None:
+    """Extract meaningful metadata from a <noinclude> block into frontmatter.
+
+    Looks for <templatedata> JSON and [[Category:...]] links. Everything
+    else ({{documentation}}, HTML comments, maintenance templates) is
+    discarded — it's MediaWiki infrastructure with no WikiMark equivalent.
+    """
+    if not node.contents:
+        return
+
+    from mwparserfromhell.nodes import Tag, Wikilink
+
+    for child in node.contents.nodes:
+        if isinstance(child, Tag) and str(child.tag).lower() == "templatedata":
+            _extract_templatedata(child, state)
+        elif isinstance(child, Wikilink):
+            target = str(child.title).strip()
+            if target.lower().startswith("category:"):
+                cat_name = target[len("category:"):].strip()
+                if cat_name:
+                    state.add_category(cat_name)
+        else:
+            raw = str(child)
+            for m in _CATEGORY_RE.finditer(raw):
+                state.add_category(m.group(1).strip())
+
+
+def _extract_templatedata(node: Any, state: _ConvertState) -> None:
+    """Parse <templatedata> JSON and add parameter schema to frontmatter."""
+    raw = str(node.contents) if node.contents else ""
+    raw = raw.strip()
+    if not raw:
+        return
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return
+
+    params = data.get("params")
+    if not isinstance(params, dict):
+        return
+
+    schema: dict[str, Any] = {}
+    for key, spec in params.items():
+        if not isinstance(spec, dict):
+            continue
+        entry: dict[str, Any] = {}
+        if "label" in spec:
+            entry["label"] = spec["label"]
+        if "type" in spec:
+            entry["type"] = spec["type"]
+        if spec.get("required"):
+            entry["required"] = True
+        if "description" in spec:
+            entry["description"] = spec["description"]
+        if "example" in spec:
+            entry["example"] = spec["example"]
+        if "default" in spec:
+            entry["default"] = spec["default"]
+        schema[key] = entry
+
+    if schema:
+        state.frontmatter["params"] = schema
+
+    desc = data.get("description")
+    if desc and isinstance(desc, str):
+        state.frontmatter.setdefault("description", desc)
 
 
 def _convert_ref(node: Any, state: _ConvertState) -> str:

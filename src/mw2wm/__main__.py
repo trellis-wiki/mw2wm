@@ -6,9 +6,16 @@ Usage::
     python -m mw2wm build <input-dir> <output-dir>
 
 Walks ``<input-dir>/pages/`` for ``.wikitext`` files, converts each
-through :func:`mw2wm.convert_page`, writes ``.wm`` output preserving
-the directory layout, copies ``<input-dir>/files/`` to
-``<output-dir>/assets/``, and emits a ``CONVERSION.md`` report.
+through :func:`mw2wm.convert_page`, and writes ``.wm`` output using
+WikiMark directory conventions:
+
+- ``pages/``       — content pages (MediaWiki Main namespace → root)
+- ``templates/``   — template pages
+- ``categories/``  — category pages
+- ``assets/``      — images and files
+
+Other MediaWiki namespaces (File, Module, MediaWiki, etc.) are
+infrastructure and not converted.
 """
 
 from __future__ import annotations
@@ -23,6 +30,50 @@ from .convert import _build_template_library
 from .report import Report
 from .templates import load_plugins, reset_plugins
 
+# MediaWiki namespaces → WikiMark output directories.
+# None = drop (infrastructure, not content).
+_NS_MAP: dict[str, str | None] = {
+    "Main": "pages",
+    "Template": "templates",
+    "Category": "categories",
+    "Book": "pages/Book",
+}
+# Everything not listed is dropped with a report entry.
+
+
+def _output_path_for(
+    rel: Path, pages_src: Path, output_dir: Path,
+) -> tuple[Path | None, str]:
+    """Map a MediaWiki namespace path to a WikiMark output path.
+
+    Returns (output_path, title) or (None, title) if the namespace
+    should be dropped.
+    """
+    parts = rel.parts
+    if not parts:
+        return None, str(rel)
+
+    mw_ns = parts[0]
+    rest = Path(*parts[1:]) if len(parts) > 1 else Path(rel.stem)
+
+    target_dir = _NS_MAP.get(mw_ns)
+    if target_dir is None and mw_ns not in _NS_MAP:
+        return None, f"{mw_ns} / {rest.with_suffix('').as_posix()}"
+
+    if target_dir is None:
+        return None, f"{mw_ns} / {rest.with_suffix('').as_posix()}"
+
+    # For Main namespace, pages go to root of pages/ (no Main/ prefix).
+    # For Template/Category, they go to templates/ or categories/.
+    if mw_ns == "Main":
+        out = output_dir / target_dir / rest.with_suffix(".wm")
+        title = rest.with_suffix("").as_posix().replace("/", " / ")
+    else:
+        out = output_dir / target_dir / rest.with_suffix(".wm")
+        title = f"{mw_ns} / {rest.with_suffix('').as_posix()}"
+
+    return out, title
+
 
 def build(input_dir: Path, output_dir: Path) -> int:
     pages_src = input_dir / "pages"
@@ -30,7 +81,6 @@ def build(input_dir: Path, output_dir: Path) -> int:
         print(f"error: {pages_src} not found", file=sys.stderr)
         return 2
 
-    pages_dst = output_dir / "pages"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Load wiki-specific template overrides (if any)
@@ -48,10 +98,17 @@ def build(input_dir: Path, output_dir: Path) -> int:
     converted = 0
     redirects = 0
     errors = 0
+    skipped_ns: dict[str, int] = {}
 
     for wikitext_file in sorted(pages_src.rglob("*.wikitext")):
         rel = wikitext_file.relative_to(pages_src)
-        title = rel.with_suffix("").as_posix().replace("/", " / ")
+        out_path, title = _output_path_for(rel, pages_src, output_dir)
+
+        if out_path is None:
+            mw_ns = rel.parts[0] if rel.parts else "unknown"
+            skipped_ns[mw_ns] = skipped_ns.get(mw_ns, 0) + 1
+            continue
+
         try:
             wikitext = wikitext_file.read_text(encoding="utf-8")
             page = convert_page(wikitext, title=title, report=report,
@@ -61,7 +118,6 @@ def build(input_dir: Path, output_dir: Path) -> int:
             print(f"  error converting {rel}: {e}", file=sys.stderr)
             continue
 
-        out_path = (pages_dst / rel).with_suffix(".wm")
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(page.to_wikimark(), encoding="utf-8")
         if page.redirect:
@@ -87,8 +143,17 @@ def build(input_dir: Path, output_dir: Path) -> int:
     )
 
     print(f"Converted {converted} pages "
-          f"({redirects} redirects) → {pages_dst}")
-    print(f"Copied {copied_assets} assets → {output_dir}/assets/")
+          f"({redirects} redirects)")
+    print(f"  pages/: {sum(1 for _ in (output_dir / 'pages').rglob('*.wm'))}")
+    if (output_dir / "templates").is_dir():
+        print(f"  templates/: {sum(1 for _ in (output_dir / 'templates').rglob('*.wm'))}")
+    if (output_dir / "categories").is_dir():
+        print(f"  categories/: {sum(1 for _ in (output_dir / 'categories').rglob('*.wm'))}")
+    print(f"  assets/: {copied_assets}")
+    if skipped_ns:
+        skipped_total = sum(skipped_ns.values())
+        detail = ", ".join(f"{k}:{v}" for k, v in sorted(skipped_ns.items()))
+        print(f"Skipped {skipped_total} MW infrastructure pages ({detail})")
     print(f"Report: {output_dir}/CONVERSION.md "
           f"({len(report.entries)} unhandled entries)")
 

@@ -69,9 +69,15 @@ def _output_path_for(
     else:
         title = f"{mw_ns} / {rest.with_suffix('').as_posix()}"
 
-    # Lowercase the output filename — URLs should be lowercase
-    lowered = rest.with_suffix(".wm").as_posix().lower()
-    out = output_dir / target_dir / lowered
+    # Normalize the output filename
+    raw = rest.with_suffix("").as_posix()
+    if target_dir in ("templates", "categories"):
+        # Template/category names use kebab-case to match call syntax
+        normalized = raw.lower().replace(" ", "-").replace("_", "-") + ".wm"
+    else:
+        # Content pages: lowercase with underscores for spaces
+        normalized = raw.lower().replace(" ", "_") + ".wm"
+    out = output_dir / target_dir / normalized
 
     return out, title
 

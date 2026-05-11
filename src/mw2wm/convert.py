@@ -670,9 +670,18 @@ def _convert_parser_function(node: Any, name: str, state: _ConvertState) -> str:
     func = func.strip().lower()
     condition = condition.strip()
 
-    # #subobject → WikiMark semantic annotations (special case)
+    # #subobject → template call (semantic handling at render time)
     if func == "#subobject":
-        return _convert_subobject(node, condition, state)
+        args: dict[str, str] = {}
+        if condition.strip():
+            args["1"] = condition.strip()
+        for param in node.params:
+            if param.showkey:
+                key = str(param.name).strip()
+                val = _convert_nodes(param.value.nodes, state).strip()
+                if key and val:
+                    args[key] = val
+        return _emit_template_call("subobject", args)
 
     # #invoke → error (Lua modules can't be auto-converted)
     if func == "#invoke":
@@ -705,33 +714,6 @@ def _convert_parser_function(node: Any, name: str, state: _ConvertState) -> str:
     return _emit_template_call(template_name, args)
 
 
-def _convert_subobject(node: Any, condition: str, state: _ConvertState) -> str:
-    """Convert #subobject to WikiMark semantic annotations."""
-    props = []
-    subobj_id = condition.strip() if condition.strip() else None
-    if subobj_id:
-        props.append(("_id", subobj_id))
-    for param in node.params:
-        if param.showkey:
-            key = str(param.name).strip()
-            val = str(param.value).strip()
-            if key and val:
-                props.append((key, val))
-    if not props:
-        return ""
-
-    annotation_parts = [f'{k}="{v}"' for k, v in props]
-    annotation = " ".join(annotation_parts)
-
-    if state._node_output:
-        for i in range(len(state._node_output) - 1, -1, -1):
-            text = state._node_output[i].strip()
-            if text:
-                state._node_output[i] = f"[{text}]|{annotation}|"
-                return ""
-
-    state._pending_semantic = props
-    return ""
 
 
 def _kebabize(name: str) -> str:

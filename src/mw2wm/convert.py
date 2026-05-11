@@ -1026,14 +1026,9 @@ def _convert_tag(node: Any, state: _ConvertState) -> str:
         return str(node)
 
     if tag == "dpl":
-        # DynamicPageList3 — needs Trellis-side implementation. Emit a
-        # placeholder template so the page renders with a visible marker.
         state.report.add("dpl-block", state.title, "<dpl>...</dpl>")
-        content = str(node.contents) if node.contents else ""
-        return (
-            f'\n\n<!-- MIGRATION: <dpl> block preserved as raw text below -->\n'
-            f'<div class="wm-dpl-placeholder">{content}</div>\n\n'
-        )
+        raw = str(node)
+        return f"\n\n**#DPL DOES NOT SUPPORT AUTOMATIC CONVERSION**\n\n```\n{raw}\n```\n\n"
 
     if tag == "includeonly":
         return _convert_nodes(node.contents.nodes, state) if node.contents else ""

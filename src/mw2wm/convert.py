@@ -154,7 +154,7 @@ _INCLUDEONLY_RE = re.compile(
 _NOINCLUDE_RE = re.compile(
     r"<noinclude>.*?</noinclude>", re.DOTALL | re.IGNORECASE
 )
-_TEMPLATE_ARG_RE_MW = re.compile(r"\{\{\{([^}|]+)(?:\|([^}]*))?\}\}\}")
+_TEMPLATE_ARG_RE_MW = re.compile(r"\{\{\{([^}|]*)(?:\|([^}]*))?\}\}\}")
 
 
 def _build_template_library(pages_dir: Path) -> dict[str, str]:
@@ -189,12 +189,22 @@ def _build_template_library(pages_dir: Path) -> dict[str, str]:
 
 
 def _expand_template(body: str, args: dict[str, str]) -> str:
-    """Substitute {{{1}}}, {{{name}}}, {{{name|default}}} in a template body."""
+    """Substitute {{{1}}}, {{{name}}}, {{{name|default}}} in a template body.
+
+    Runs multiple passes to resolve nested args like {{{2|{{{simult}}}}}}.
+    """
     def _replace_arg(m: re.Match) -> str:
         key = m.group(1).strip()
         default = m.group(2) if m.group(2) is not None else ""
         return args.get(key, default)
-    return _TEMPLATE_ARG_RE_MW.sub(_replace_arg, body)
+    prev = None
+    result = body
+    for _ in range(5):
+        if prev == result:
+            break
+        prev = result
+        result = _TEMPLATE_ARG_RE_MW.sub(_replace_arg, result)
+    return result
 
 
 @dataclass
@@ -342,8 +352,17 @@ def _convert_argument(node: Any, state: _ConvertState) -> str:
         default_str = _convert_nodes(default.nodes, state).strip()
         inputs = state.frontmatter.setdefault("inputs", {})
         entry = inputs.setdefault(name, {})
-        if default_str and "default" not in entry:
-            entry["default"] = default_str
+        if default_str:
+            if "default" not in entry:
+                entry["default"] = default_str
+            elif entry["default"] != default_str:
+                existing = entry["default"]
+                state.report.add("multiple-defaults", state.title,
+                                 f"{name}: {existing!r} vs {default_str!r}")
+                entry["default"] = (
+                    f"WARN Multiple defaults: {existing}, {default_str}"
+                )
+                state.add_category("Templates with multiple defaults")
 
     return f"${{{name}}}"
 

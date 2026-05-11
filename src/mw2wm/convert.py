@@ -315,7 +315,7 @@ def _convert_node(node: Any, state: _ConvertState) -> str:
     if isinstance(node, Tag):
         return prefix + _convert_tag(node, state)
     if isinstance(node, Comment):
-        return prefix  # HTML comments stripped silently
+        return prefix + f"<!--{node.contents}-->"
     if isinstance(node, HTMLEntity):
         return prefix + str(node)
     if isinstance(node, Argument):
@@ -450,7 +450,7 @@ def _convert_wikilink(node: Any, state: _ConvertState) -> str:
         # Plain category → frontmatter, no body output
         name = target[len("Category:"):]
         if display:
-            pass
+            state.set_fm("sort_key", display)
         state.add_category(name)
         return ""
 
@@ -509,6 +509,7 @@ def _convert_file_link(node: Any, state: _ConvertState) -> str:
     width: str | None = None
     height: str | None = None
     align: str | None = None
+    alt_text: str | None = None
     caption = ""
 
     if node.text:
@@ -525,7 +526,9 @@ def _convert_file_link(node: Any, state: _ConvertState) -> str:
                 width = m.group(1)
                 if m.group(2):
                     height = m.group(2)
-            elif part.startswith(("link=", "alt=", "page=", "class=", "lang=",
+            elif part.startswith("alt="):
+                alt_text = part[4:]
+            elif part.startswith(("link=", "page=", "class=", "lang=",
                                    "upright", "upright=")):
                 state.report.add("file-option-dropped", state.title, part)
             else:
@@ -537,7 +540,7 @@ def _convert_file_link(node: Any, state: _ConvertState) -> str:
     # For captions with wiki links, emit raw HTML so links are preserved.
     if caption and _WIKI_LINK_IN_TEXT.search(caption):
         from html import escape as h
-        alt_text = _caption_to_plain(caption)
+        alt_plain = alt_text or _caption_to_plain(caption)
         caption_html = _caption_to_html(caption)
         cls_list = ["wm-figure"] + [f"wm-{c}" for c in classes]
         if align:
@@ -552,12 +555,12 @@ def _convert_file_link(node: Any, state: _ConvertState) -> str:
             img_attrs += f' height="{height}"'
         return (
             f'\n<figure class="{h(cls)}"{style}>'
-            f'<img src="{h(href)}" alt="{h(alt_text)}"{img_attrs} />'
+            f'<img src="{h(href)}" alt="{h(alt_plain)}"{img_attrs} />'
             f'<figcaption>{caption_html}</figcaption>'
             f'</figure>\n'
         )
 
-    alt = _caption_to_plain(caption) if caption else filename
+    alt = alt_text or (_caption_to_plain(caption) if caption else filename)
     attrs = []
     if classes:
         attrs.extend(f".{c}" for c in classes)
@@ -645,8 +648,8 @@ def _convert_template(node: Any, state: _ConvertState) -> str:
         return _emit_template_call(normalized, args)
 
     if mapping.target is None:
-        # Metadata-only template (e.g. Italic title) → captured in frontmatter
         if name in tpl.FRONTMATTER_TEMPLATES:
+            state.set_fm("title_style", "italic")
             return ""
         normalized = _kebabize(name)
         return _emit_template_call(normalized, args)

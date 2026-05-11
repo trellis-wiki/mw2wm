@@ -637,9 +637,19 @@ def _convert_template(node: Any, state: _ConvertState) -> str:
                 return f"{n:,.0f}" if n == int(n) else f"{n:,}"
             except ValueError:
                 return value
-        if pl in ("fullurl", "ns", "plural", "grammar"):
+        if pl == "plural":
+            try:
+                count = int(float(value.replace(",", "")))
+                params = list(node.params)
+                singular = str(params[0].value).strip() if len(params) > 0 else value
+                plural_form = str(params[1].value).strip() if len(params) > 1 else singular
+                return singular if count == 1 else plural_form
+            except (ValueError, IndexError):
+                return value
+        if pl in ("fullurl", "ns", "grammar"):
             state.report.add("parser-magic", state.title, prefix)
-            return value
+            raw = str(node)
+            return f"**{pl.upper()} DOES NOT SUPPORT AUTOMATIC CONVERSION** `{raw}`"
 
     mapping = tpl.lookup(name)
 

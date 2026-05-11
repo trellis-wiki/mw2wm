@@ -429,10 +429,10 @@ def _convert_quote_emphasis(text: str) -> str:
 def _md_link_target(target: str) -> str:
     """Normalize a wiki page name for use as a Markdown link target.
 
-    Lowercases, replaces spaces with underscores, and wraps in angle
-    brackets if the target contains parentheses.
+    Replaces spaces with underscores and wraps in angle brackets if
+    the target contains parentheses.
     """
-    target = target.replace(" ", "_").lower()
+    target = target.replace(" ", "_")
     if "(" in target or ")" in target:
         return f"<{target}>"
     return target
@@ -467,7 +467,7 @@ def _convert_wikilink(node: Any, state: _ConvertState) -> str:
     # Normal wiki link
     if display:
         return f"[{display}]({_md_link_target(target)})"
-    return f"[[{target.lower().replace(' ', '_')}]]"
+    return f"[[{target}]]"
 
 
 _FILE_OPT_RE = re.compile(r"^(?:thumb|thumbnail|frame|frameless|border)$",

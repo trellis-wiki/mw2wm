@@ -63,14 +63,15 @@ def _output_path_for(
     if target_dir is None:
         return None, f"{mw_ns} / {rest.with_suffix('').as_posix()}"
 
-    # For Main namespace, pages go to root of pages/ (no Main/ prefix).
-    # For Template/Category, they go to templates/ or categories/.
+    # Build the display title from the original filename
     if mw_ns == "Main":
-        out = output_dir / target_dir / rest.with_suffix(".wm")
         title = rest.with_suffix("").as_posix().replace("/", " / ")
     else:
-        out = output_dir / target_dir / rest.with_suffix(".wm")
         title = f"{mw_ns} / {rest.with_suffix('').as_posix()}"
+
+    # Lowercase the output filename — URLs should be lowercase
+    lowered = rest.with_suffix(".wm").as_posix().lower()
+    out = output_dir / target_dir / lowered
 
     return out, title
 
@@ -117,6 +118,15 @@ def build(input_dir: Path, output_dir: Path) -> int:
             errors += 1
             print(f"  error converting {rel}: {e}", file=sys.stderr)
             continue
+
+        # Ensure display title is in frontmatter (filenames are lowercase)
+        if "title" not in page.frontmatter and not page.redirect:
+            mw_ns = rel.parts[0] if rel.parts else ""
+            raw_name = rel.with_suffix("").as_posix()
+            if mw_ns in _NS_MAP:
+                raw_name = Path(*rel.parts[1:]).with_suffix("").as_posix() if len(rel.parts) > 1 else rel.stem
+            display = raw_name.replace("_", " ")
+            page.frontmatter["title"] = display
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(page.to_wikimark(), encoding="utf-8")

@@ -218,7 +218,7 @@ class _ConvertState:
     _list_type: str = ""
     template_library: dict[str, str] = field(default_factory=dict)
     _node_output: list[str] | None = None
-    _pending_semantic: list[tuple[str, str]] | None = None
+    _pending_annotation: str | None = None
     _template_depth: int = 0
     _max_template_depth: int = 10
 
@@ -253,7 +253,11 @@ def _convert_nodes(nodes: Any, state: _ConvertState, *, _toplevel: bool = False)
     out: list[str] = []
     state._node_output = out
     for node in nodes:
-        out.append(_convert_node(node, state))
+        chunk = _convert_node(node, state)
+        if state._pending_annotation and chunk.strip():
+            chunk = f"[{chunk.strip()}]|{state._pending_annotation}|"
+            state._pending_annotation = None
+        out.append(chunk)
     state._node_output = prev_output
 
     result = "".join(out)
@@ -670,18 +674,21 @@ def _convert_parser_function(node: Any, name: str, state: _ConvertState) -> str:
     func = func.strip().lower()
     condition = condition.strip()
 
-    # #subobject → template call (semantic handling at render time)
+    # #subobject → WikiMark semantic annotation
     if func == "#subobject":
-        args: dict[str, str] = {}
+        props = []
         if condition.strip():
-            args["1"] = condition.strip()
+            props.append(f'_id="{condition.strip()}"')
         for param in node.params:
             if param.showkey:
                 key = str(param.name).strip()
                 val = _convert_nodes(param.value.nodes, state).strip()
                 if key and val:
-                    args[key] = val
-        return _emit_template_call("subobject", args)
+                    props.append(f'{key}="{val}"')
+        if not props:
+            return ""
+        state._pending_annotation = " ".join(props)
+        return ""
 
     # #invoke → error (Lua modules can't be auto-converted)
     if func == "#invoke":

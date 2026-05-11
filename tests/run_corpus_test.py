@@ -99,6 +99,7 @@ def check_page(wiki_id: str, wikitext: str, title: str,
     result.convert_time_ms = (time.monotonic() - t0) * 1000
     result.output_len = len(output)
     result.has_frontmatter = output.startswith("---")
+    is_redirect = page.redirect is not None
 
     # Strip frontmatter for body checks
     body = output
@@ -107,7 +108,7 @@ def check_page(wiki_id: str, wikitext: str, title: str,
         if end != -1:
             body = body[end + 3:]
 
-    result.empty_body = len(body.strip()) == 0
+    result.empty_body = len(body.strip()) == 0 and not is_redirect
     result.noinclude_leak = body.count("<noinclude")
     result.includeonly_leak = body.count("<includeonly")
     result.templatedata_leak = body.count("<templatedata")

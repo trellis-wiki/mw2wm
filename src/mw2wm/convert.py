@@ -598,11 +598,29 @@ def _convert_template(node: Any, state: _ConvertState) -> str:
         if prefix in _MAGIC_PREFIX_MAP:
             state.set_fm(_MAGIC_PREFIX_MAP[prefix], value.strip())
             return ""
-        if prefix.lower() in ("fullurl", "ns", "urlencode", "anchorencode",
-                              "uc", "lc", "ucfirst", "lcfirst", "plural",
-                              "grammar", "formatnum"):
+        pl = prefix.lower()
+        if pl == "lc":
+            return value.lower()
+        if pl == "uc":
+            return value.upper()
+        if pl == "lcfirst":
+            return value[0].lower() + value[1:] if value else ""
+        if pl == "ucfirst":
+            return value[0].upper() + value[1:] if value else ""
+        if pl == "urlencode":
+            from urllib.parse import quote as url_quote
+            return url_quote(value, safe="")
+        if pl == "anchorencode":
+            return value.replace(" ", "_")
+        if pl == "formatnum":
+            try:
+                n = float(value.replace(",", ""))
+                return f"{n:,.0f}" if n == int(n) else f"{n:,}"
+            except ValueError:
+                return value
+        if pl in ("fullurl", "ns", "plural", "grammar"):
             state.report.add("parser-magic", state.title, prefix)
-            return str(node.params[0].value) if node.params else ""
+            return value
 
     mapping = tpl.lookup(name)
 
@@ -729,6 +747,100 @@ def _eval_parser_function(node: Any, name: str, state: _ConvertState) -> str:
     # {{#ifexist:page|then|else}} — can't check at conversion time
     if func == "#ifexist":
         return _param(0)
+
+    # {{#iferror:test|then|else}} — error trapping
+    if func == "#iferror":
+        return condition if condition else _param(0)
+
+    # {{#expr:expression}} — math evaluation
+    if func == "#expr":
+        try:
+            safe = re.sub(r"[^0-9+\-*/().%<>=! emodround]", "", condition)
+            result = str(eval(safe))  # noqa: S307
+            if result.endswith(".0"):
+                result = result[:-2]
+            return result
+        except Exception:
+            return condition
+
+    # {{#sub:string|start|length}}
+    if func == "#sub":
+        try:
+            start = int(_raw_param(0))
+            length = int(_raw_param(1)) if _raw_param(1) else None
+            if length:
+                return condition[start:start + length] if length > 0 else condition[start:length]
+            return condition[start:]
+        except (ValueError, IndexError):
+            return condition
+
+    # {{#len:string}}
+    if func == "#len":
+        return str(len(condition))
+
+    # {{#count:string|substr}}
+    if func == "#count":
+        substr = _raw_param(0)
+        if substr:
+            return str(condition.count(substr))
+        return str(len(condition.split()) if condition else 0)
+
+    # {{#pos:string|target|offset}}
+    if func == "#pos":
+        target = _raw_param(0)
+        offset = int(_raw_param(1)) if _raw_param(1) else 0
+        idx = condition.find(target, offset) if target else -1
+        return str(idx) if idx >= 0 else ""
+
+    # {{#replace:string|from|to}}
+    if func == "#replace":
+        old = _raw_param(0)
+        new = _raw_param(1)
+        return condition.replace(old, new) if old else condition
+
+    # {{#titleparts:title|segments|offset}}
+    if func == "#titleparts":
+        parts = condition.split("/")
+        try:
+            segments = int(_raw_param(0)) if _raw_param(0) else len(parts)
+            offset = int(_raw_param(1)) if _raw_param(1) else 0
+            selected = parts[offset:offset + segments] if segments > 0 else parts[offset:segments]
+            return "/".join(selected)
+        except (ValueError, IndexError):
+            return condition
+
+    # {{#tag:tagname|content|attr=val}} — HTML tag generation
+    if func == "#tag":
+        tag_name = condition
+        content = _param(0)
+        attrs = ""
+        for param in list(node.params)[1:]:
+            if param.showkey:
+                attrs += f' {param.name}="{param.value}"'
+        if content:
+            return f"<{tag_name}{attrs}>{content}</{tag_name}>"
+        return f"<{tag_name}{attrs} />"
+
+    # {{#ifexpr:expr|then|else}} — conditional on math expression
+    if func == "#ifexpr":
+        try:
+            safe = re.sub(r"[^0-9+\-*/().%<>=! emodround]", "", condition)
+            val = eval(safe)  # noqa: S307
+            return _param(0) if val else _param(1)
+        except Exception:
+            return _param(1)
+
+    # {{#time:format|timestamp}} / {{#timel:...}} — date formatting
+    if func in ("#time", "#timel"):
+        return condition
+
+    # {{#language:code}} — language name
+    if func == "#language":
+        return condition
+
+    # {{#coordinates:...}} — GeoData extension
+    if func == "#coordinates":
+        return condition
 
     # {{#subobject:name|prop=val|...}} — Semantic MediaWiki entity.
     # Attaches as a WikiMark annotation to adjacent visible text.

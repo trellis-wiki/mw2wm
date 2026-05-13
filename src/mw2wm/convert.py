@@ -734,6 +734,23 @@ _MW_INFOBOX_SKIP = {
     "child", "embed", "decat", "templatestyles",
 }
 
+def _is_mw_cruft(value: str) -> bool:
+    """Check if a value is MW template/parser syntax, not meaningful data."""
+    stripped = value.strip()
+    if not stripped:
+        return True
+    if stripped.startswith("<!--"):
+        return True
+    if "{{{" in stripped:
+        return True
+    if stripped.startswith("{{") and stripped.count("{{") > stripped.count("}}"):
+        return True
+    syntax = stripped.count("{{") + stripped.count("${")
+    if syntax >= 2 and len(stripped) > 30:
+        return True
+    return False
+
+
 _MW_INFOBOX_LABEL_RE = re.compile(r"^(?:label|header)(\d+)$")
 _MW_INFOBOX_DATA_RE = re.compile(r"^data(\d+)$")
 
@@ -760,11 +777,15 @@ def _convert_mw_infobox(args: dict[str, str]) -> str:
 
     for key, value in args.items():
         lk = key.lower().strip()
+        if not re.match(r"^[a-zA-Z][a-zA-Z0-9_ -]*$", key.strip()):
+            continue
         if lk in _MW_INFOBOX_SKIP or lk in ("title", "above", "name",
                                               "image", "caption",
                                               "image_caption", "subtitle"):
             continue
-        if lk.endswith("style") or lk.endswith("class"):
+        if (lk.endswith("style") or lk.endswith("class")
+                or lk.startswith("row") or lk.startswith("child")
+                or lk.startswith("class") or lk.startswith("colspan")):
             continue
 
         m_label = _MW_INFOBOX_LABEL_RE.match(lk)
@@ -777,18 +798,18 @@ def _convert_mw_infobox(args: dict[str, str]) -> str:
             data[m_data.group(1)] = value.strip()
             continue
 
-        if value.strip():
+        if value.strip() and not _is_mw_cruft(value):
             out[_kebabize(key)] = value
 
     for num in sorted(data.keys(), key=lambda x: int(x)):
         val = data[num]
-        if not val:
+        if not val or _is_mw_cruft(val):
             continue
         label = labels.get(num, "")
-        if label:
+        if label and not _is_mw_cruft(label):
             field_key = _kebabize(label)
             out[field_key] = val
-        else:
+        elif not label and not _is_mw_cruft(val):
             out[f"field-{num}"] = val
 
     return _emit_template_call("infobox", out)

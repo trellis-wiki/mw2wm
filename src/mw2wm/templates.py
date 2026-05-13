@@ -116,11 +116,6 @@ TEMPLATE_MAPPINGS: dict[str, TemplateMapping] = {
         target="birth-date-and-age",
         positional={"1": "year", "2": "month", "3": "day"},
     ),
-    "Infobox officeholder": TemplateMapping(target="infobox"),
-    "Infobox settlement": TemplateMapping(target="infobox"),
-    "Infobox country": TemplateMapping(target="infobox"),
-    "Infobox person": TemplateMapping(target="infobox"),
-    "Infobox": TemplateMapping(target="infobox"),
     "Lang": TemplateMapping(
         target="lang",
         positional={"1": "code", "2": "text"},

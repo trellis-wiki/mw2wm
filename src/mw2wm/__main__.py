@@ -128,10 +128,14 @@ def build(input_dir: Path, output_dir: Path) -> int:
         # Ensure display title is in frontmatter (filenames are lowercase)
         if "title" not in page.frontmatter and not page.redirect:
             mw_ns = rel.parts[0] if rel.parts else ""
+            target_dir = _NS_MAP.get(mw_ns)
             raw_name = rel.with_suffix("").as_posix()
             if mw_ns in _NS_MAP:
                 raw_name = Path(*rel.parts[1:]).with_suffix("").as_posix() if len(rel.parts) > 1 else rel.stem
-            display = raw_name.replace("_", " ")
+            if target_dir in ("templates", "categories"):
+                display = raw_name.lower().replace(" ", "-").replace("_", "-")
+            else:
+                display = raw_name.replace("_", " ")
             page.frontmatter["title"] = display
 
         out_path.parent.mkdir(parents=True, exist_ok=True)

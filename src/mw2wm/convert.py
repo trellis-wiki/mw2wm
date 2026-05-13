@@ -648,6 +648,8 @@ def _convert_template(node: Any, state: _ConvertState) -> str:
         args[k] = value
 
     if mapping is None:
+        if name.strip().lower() == "infobox":
+            args = _convert_mw_infobox_args(args)
         normalized = _kebabize(name)
         return _emit_template_call(normalized, args)
 
@@ -731,6 +733,80 @@ _MW_INFOBOX_SKIP = {
     "above", "below", "subheader", "subheaderstyle", "subheaderclass",
     "child", "embed", "decat", "templatestyles",
 }
+
+_MW_INFOBOX_SKIP_RE = re.compile(
+    r"(style|class|colspan|rowspan)$|"
+    r"^(row|child|embed|decat|templatestyles|subbox|autoheaders|bodyclass|bodystyle)"
+)
+
+_LABEL_NUM_RE = re.compile(r"^(?:label|header)(\d+)$")
+_DATA_NUM_RE = re.compile(r"^data(\d+)$")
+_HEADER_NUM_RE = re.compile(r"^header(\d+)$")
+
+
+def _convert_mw_infobox_args(args: dict[str, str]) -> dict[str, str]:
+    """Convert MW Infobox numbered label/data to named key=value.
+
+    label29="Country" data29="Empire" → country="Empire"
+    label29="${subdivision_type}" data29="${subdivision_name}" → subdivision-type="${subdivision_name}"
+    """
+    out: dict[str, str] = {}
+
+    # Extract special fields
+    name = args.get("above", args.get("title", args.get("name", "")))
+    if name and name.strip():
+        out["name"] = name
+    for k in ("image", "caption", "image_caption", "subtitle", "subheader"):
+        v = args.get(k, "")
+        if v and v.strip() and not v.strip().startswith("<!--"):
+            out_key = "caption" if k == "image_caption" else k
+            out[out_key] = v
+
+    # Collect numbered pairs
+    labels: dict[int, str] = {}
+    data: dict[int, str] = {}
+    headers: dict[int, str] = {}
+
+    for key, value in args.items():
+        lk = key.lower().strip()
+        m = _HEADER_NUM_RE.match(lk)
+        if m:
+            if value.strip() and not value.strip().startswith("<!--"):
+                headers[int(m.group(1))] = value.strip()
+            continue
+        m = _LABEL_NUM_RE.match(lk)
+        if m:
+            labels[int(m.group(1))] = value.strip()
+            continue
+        m = _DATA_NUM_RE.match(lk)
+        if m:
+            data[int(m.group(1))] = value.strip()
+            continue
+
+    # Convert numbered pairs to named fields
+    for num in sorted(set(data.keys()) | set(headers.keys())):
+        if num in headers:
+            continue
+        val = data.get(num, "")
+        if not val or val.startswith("<!--"):
+            continue
+        label = labels.get(num, "")
+        if not label:
+            continue
+
+        # Clean the label text
+        clean = re.sub(r"&nbsp;|&#160;", " ", label)
+        clean = re.sub(r"<[^>]+>", "", clean)
+        clean = re.sub(r"[•·]", "", clean).strip()
+
+        # Dynamic key: ${var} stays as-is — resolves at render time
+        if re.match(r"^\$\{[\w]+\}$", clean):
+            out[clean] = val
+        elif clean and re.match(r"^[a-zA-Z]", clean):
+            out[_kebabize(clean)] = val
+
+    return out
+
 
 def _is_mw_cruft(value: str) -> bool:
     """Check if a value is empty or an MW placeholder, not meaningful data."""

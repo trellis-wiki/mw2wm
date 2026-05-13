@@ -887,6 +887,41 @@ def _convert_mw_infobox(args: dict[str, str]) -> str:
     return _emit_template_call("infobox", out)
 
 
+def _convert_dpl(node: Any, state: _ConvertState) -> str:
+    """Convert <dpl>...</dpl> to {{page-list}} template call."""
+    content = str(node.contents).strip() if node.contents else ""
+    if not content:
+        return ""
+
+    args: dict[str, str] = {}
+    notcats: list[str] = []
+
+    for line in content.split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip().lower()
+        value = value.strip()
+
+        if key == "category":
+            args["category"] = value
+        elif key == "notcategory":
+            notcats.append(value)
+        elif key == "ordermethod":
+            args["order"] = value
+
+    if notcats:
+        args["notcategory"] = ",".join(notcats)
+
+    if not args.get("category"):
+        return ""
+
+    return "\n\n" + _emit_template_call("page-list", args) + "\n\n"
+
+
 def _kebabize(name: str) -> str:
     """Convert a MediaWiki-style name to a kebab-case identifier."""
     return name.strip().lower().replace(" ", "-").replace("_", "-")
@@ -993,9 +1028,7 @@ def _convert_tag(node: Any, state: _ConvertState) -> str:
         return str(node)
 
     if tag == "dpl":
-        state.report.add("dpl-block", state.title, "<dpl>...</dpl>")
-        raw = str(node)
-        return f"\n\n**#DPL DOES NOT SUPPORT AUTOMATIC CONVERSION**\n\n```\n{raw}\n```\n\n"
+        return _convert_dpl(node, state)
 
     if tag == "includeonly":
         return _convert_nodes(node.contents.nodes, state) if node.contents else ""

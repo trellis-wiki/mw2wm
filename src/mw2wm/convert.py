@@ -648,6 +648,8 @@ def _convert_template(node: Any, state: _ConvertState) -> str:
         args[k] = value
 
     if mapping is None:
+        if name.strip().lower() == "infobox":
+            return _convert_mw_infobox(args)
         normalized = _kebabize(name)
         return _emit_template_call(normalized, args)
 
@@ -722,6 +724,74 @@ def _convert_parser_function(node: Any, name: str, state: _ConvertState) -> str:
     return _emit_template_call(template_name, args)
 
 
+
+
+_MW_INFOBOX_SKIP = {
+    "bodystyle", "bodyclass", "titlestyle", "abovestyle", "belowstyle",
+    "headerstyle", "labelstyle", "datastyle", "imagestyle",
+    "aboveclass", "belowclass", "headerclass", "imageclass",
+    "above", "below", "subheader", "subheaderstyle", "subheaderclass",
+    "child", "embed", "decat", "templatestyles",
+}
+
+_MW_INFOBOX_LABEL_RE = re.compile(r"^(?:label|header)(\d+)$")
+_MW_INFOBOX_DATA_RE = re.compile(r"^data(\d+)$")
+
+
+def _convert_mw_infobox(args: dict[str, str]) -> str:
+    """Convert MW's base Infobox numbered label/data pattern to Trellis infobox.
+
+    MW Infobox uses: above/title for name, image, caption, and
+    labelN/dataN pairs. We extract these into clean key=value args
+    where the label text becomes the key name.
+    """
+    out: dict[str, str] = {}
+
+    name = args.get("title", args.get("above", args.get("name", "")))
+    if name:
+        out["name"] = name
+
+    for k in ("image", "caption", "image_caption", "subtitle"):
+        if k in args and args[k].strip():
+            out[k] = args[k]
+
+    labels: dict[str, str] = {}
+    data: dict[str, str] = {}
+
+    for key, value in args.items():
+        lk = key.lower().strip()
+        if lk in _MW_INFOBOX_SKIP or lk in ("title", "above", "name",
+                                              "image", "caption",
+                                              "image_caption", "subtitle"):
+            continue
+        if lk.endswith("style") or lk.endswith("class"):
+            continue
+
+        m_label = _MW_INFOBOX_LABEL_RE.match(lk)
+        if m_label:
+            labels[m_label.group(1)] = value.strip()
+            continue
+
+        m_data = _MW_INFOBOX_DATA_RE.match(lk)
+        if m_data:
+            data[m_data.group(1)] = value.strip()
+            continue
+
+        if value.strip():
+            out[_kebabize(key)] = value
+
+    for num in sorted(data.keys(), key=lambda x: int(x)):
+        val = data[num]
+        if not val:
+            continue
+        label = labels.get(num, "")
+        if label:
+            field_key = _kebabize(label)
+            out[field_key] = val
+        else:
+            out[f"field-{num}"] = val
+
+    return _emit_template_call("infobox", out)
 
 
 def _kebabize(name: str) -> str:

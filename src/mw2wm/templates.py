@@ -108,34 +108,6 @@ class TemplateMapping:
 
 
 TEMPLATE_MAPPINGS: dict[str, TemplateMapping] = {
-    "Hatnote": TemplateMapping(
-        target="hatnote",
-        positional={"1": "text"},
-    ),
-    "Birth date and age": TemplateMapping(
-        target="birth-date-and-age",
-        positional={"1": "year", "2": "month", "3": "day"},
-    ),
-    "Lang": TemplateMapping(
-        target="lang",
-        positional={"1": "code", "2": "text"},
-    ),
-    "Coord": TemplateMapping(
-        target="coord",
-        positional={"1": "lat", "2": "lon"},
-    ),
-    "URL": TemplateMapping(
-        target="url",
-        positional={"1": "href", "2": "text"},
-    ),
-    "Quote": TemplateMapping(
-        target="quote",
-        positional={"1": "text", "2": "source", "3": "date"},
-    ),
-    "Tl": TemplateMapping(
-        target="tl",
-        positional={"1": "name"},
-    ),
     "Italic title": TemplateMapping(target=None),
 }
 

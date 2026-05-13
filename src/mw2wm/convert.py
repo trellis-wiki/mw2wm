@@ -632,7 +632,8 @@ def _convert_template(node: Any, state: _ConvertState) -> str:
         prefix, _, value = name.partition(":")
         prefix = prefix.strip()
         if prefix in _MAGIC_PREFIX_MAP:
-            clean = re.sub(r"'{2,5}", "", value.strip())
+            clean = re.sub(r"'''([^']+)'''", r"**\1**", value.strip())
+            clean = re.sub(r"''([^']+)''", r"*\1*", clean)
             state.set_fm(_MAGIC_PREFIX_MAP[prefix], clean)
             return ""
         args: dict[str, str] = {"1": value.strip()}

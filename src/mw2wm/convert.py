@@ -648,8 +648,6 @@ def _convert_template(node: Any, state: _ConvertState) -> str:
         args[k] = value
 
     if mapping is None:
-        if name.strip().lower() == "infobox":
-            return _convert_mw_infobox(args)
         normalized = _kebabize(name)
         return _emit_template_call(normalized, args)
 
@@ -735,18 +733,11 @@ _MW_INFOBOX_SKIP = {
 }
 
 def _is_mw_cruft(value: str) -> bool:
-    """Check if a value is MW template/parser syntax, not meaningful data."""
+    """Check if a value is empty or an MW placeholder, not meaningful data."""
     stripped = value.strip()
     if not stripped:
         return True
     if stripped.startswith("<!--"):
-        return True
-    if "{{{" in stripped:
-        return True
-    if stripped.startswith("{{") and stripped.count("{{") > stripped.count("}}"):
-        return True
-    syntax = stripped.count("{{") + stripped.count("${")
-    if syntax >= 2 and len(stripped) > 30:
         return True
     return False
 
@@ -756,36 +747,35 @@ _MW_INFOBOX_DATA_RE = re.compile(r"^data(\d+)$")
 
 
 def _convert_mw_infobox(args: dict[str, str]) -> str:
-    """Convert MW's base Infobox numbered label/data pattern to Trellis infobox.
+    """Convert MW's base Infobox call to a clean Trellis infobox.
 
-    MW Infobox uses: above/title for name, image, caption, and
-    labelN/dataN pairs. We extract these into clean key=value args
-    where the label text becomes the key name.
+    Extracts meaningful data fields, skipping all MW layout/style
+    params and complex computed values.
     """
     out: dict[str, str] = {}
 
     name = args.get("title", args.get("above", args.get("name", "")))
-    if name:
+    if name and not _is_mw_cruft(name):
         out["name"] = name
 
     for k in ("image", "caption", "image_caption", "subtitle"):
-        if k in args and args[k].strip():
-            out[k] = args[k]
+        v = args.get(k, "")
+        if v and not _is_mw_cruft(v):
+            out[k] = v
 
     labels: dict[str, str] = {}
     data: dict[str, str] = {}
 
     for key, value in args.items():
         lk = key.lower().strip()
-        if not re.match(r"^[a-zA-Z][a-zA-Z0-9_ -]*$", key.strip()):
+        if not re.match(r"^[a-z][a-z0-9_ ]*$", lk):
             continue
-        if lk in _MW_INFOBOX_SKIP or lk in ("title", "above", "name",
-                                              "image", "caption",
-                                              "image_caption", "subtitle"):
+        if lk in _MW_INFOBOX_SKIP:
             continue
-        if (lk.endswith("style") or lk.endswith("class")
-                or lk.startswith("row") or lk.startswith("child")
-                or lk.startswith("class") or lk.startswith("colspan")):
+        if any(lk.startswith(p) for p in ("row", "child", "class", "colspan",
+                                           "header", "below", "above", "sub")):
+            continue
+        if any(lk.endswith(s) for s in ("style", "class", "footnotes")):
             continue
 
         m_label = _MW_INFOBOX_LABEL_RE.match(lk)
@@ -798,19 +788,25 @@ def _convert_mw_infobox(args: dict[str, str]) -> str:
             data[m_data.group(1)] = value.strip()
             continue
 
-        if value.strip() and not _is_mw_cruft(value):
-            out[_kebabize(key)] = value
-
     for num in sorted(data.keys(), key=lambda x: int(x)):
         val = data[num]
         if not val or _is_mw_cruft(val):
             continue
         label = labels.get(num, "")
-        if label and not _is_mw_cruft(label):
-            field_key = _kebabize(label)
-            out[field_key] = val
-        elif not label and not _is_mw_cruft(val):
-            out[f"field-{num}"] = val
+        if not label or _is_mw_cruft(label):
+            continue
+        # If label is a variable reference ${foo}, use the variable name
+        var_match = re.match(r"^\s*\$\{(\w+)\}\s*$", label)
+        if var_match:
+            clean = var_match.group(1)
+        else:
+            clean = re.sub(r"&nbsp;|&amp;nbsp;|&#160;", " ", label)
+            clean = re.sub(r"<[^>]+>", "", clean)
+            clean = re.sub(r"\$\{[^}]*\}", "", clean)
+            clean = re.sub(r"\{\{[^}]*\}\}", "", clean)
+            clean = re.sub(r"[^a-zA-Z0-9 _-]", "", clean).strip()
+        if clean and re.match(r"^[a-zA-Z]", clean):
+            out[_kebabize(clean)] = val
 
     return _emit_template_call("infobox", out)
 

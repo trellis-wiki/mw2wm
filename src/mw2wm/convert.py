@@ -216,6 +216,7 @@ class _ConvertState:
     named_footnotes: dict[str, int] = field(default_factory=dict)
     _list_depth: int = 0
     _list_type: str = ""
+    _in_list: bool = False
     template_library: dict[str, str] = field(default_factory=dict)
     _node_output: list[str] | None = None
     _pending_annotation: str | None = None
@@ -277,6 +278,7 @@ def _flush_list_marker(state: _ConvertState) -> str:
     marker_type = state._list_type
     state._list_depth = 0
     state._list_type = ""
+    state._in_list = True
     if marker_type == "#":
         return "   " * (depth - 1) + "1. "
     return "  " * (depth - 1) + "* "
@@ -386,6 +388,15 @@ def _convert_text(text: str, state: _ConvertState) -> str:
     # We do a stateful pass: detect the longest opening run, find the
     # matching close run of the same length, convert.
     text = _convert_quote_emphasis(text)
+
+    # If we just left a list and hit a newline, insert blank line to
+    # break out of the list in GFM.
+    if state._in_list and "\n" in text:
+        first_newline = text.index("\n")
+        after = text[first_newline + 1:].lstrip("\n")
+        if after and not after.startswith("*") and not after.startswith("#") and not after.startswith("1."):
+            text = text[:first_newline] + "\n\n" + after
+        state._in_list = False
 
     # Magic-word switches (__NOTOC__, etc.). Handled here because they
     # can appear mid-text without being their own nodes.

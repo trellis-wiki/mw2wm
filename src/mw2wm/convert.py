@@ -101,7 +101,7 @@ def convert_page(
     # Check for #REDIRECT before parsing — it must be at the top of
     # the file and is simple enough to handle without mwparserfromhell.
     redirect_match = re.match(
-        r"^\s*#REDIRECT\s*\[\[([^\]|]+)(?:\|[^\]]*)?\]\]\s*$",
+        r"^\s*#REDIRECT\s*\[\[([^\]|]+)(?:\|[^\]]*)?\]\].*$",
         wikitext,
         re.IGNORECASE | re.MULTILINE,
     )
@@ -663,17 +663,20 @@ def _convert_template(node: Any, state: _ConvertState) -> str:
         if name.strip().lower() == "infobox":
             args = _convert_mw_infobox_args(args)
         normalized = _kebabize(name)
-        return _emit_template_call(normalized, args)
+        is_block = _is_block_template(normalized)
+        return _emit_template_call(normalized, args, block=is_block)
 
     if mapping.target is None:
         if name in tpl.FRONTMATTER_TEMPLATES:
             state.set_fm("title_style", "italic")
             return ""
         normalized = _kebabize(name)
-        return _emit_template_call(normalized, args)
+        is_block = _is_block_template(normalized)
+        return _emit_template_call(normalized, args, block=is_block)
 
     converted_args = mapping.apply(args)
-    return _emit_template_call(mapping.target, converted_args)
+    is_block = _is_block_template(mapping.target)
+    return _emit_template_call(mapping.target, converted_args, block=is_block)
 
 
 
@@ -896,7 +899,7 @@ def _convert_mw_infobox(args: dict[str, str]) -> str:
         if clean and re.match(r"^[a-zA-Z]", clean):
             out[_kebabize(clean)] = val
 
-    return _emit_template_call("infobox", out)
+    return _emit_template_call("infobox", out, block=True)
 
 
 def _convert_dpl(node: Any, state: _ConvertState) -> str:
@@ -931,7 +934,15 @@ def _convert_dpl(node: Any, state: _ConvertState) -> str:
     if not args.get("category"):
         return ""
 
-    return "\n\n" + _emit_template_call("page-list", args) + "\n\n"
+    return "\n\n" + _emit_template_call("page-list", args, block=True) + "\n\n"
+
+
+_BLOCK_TEMPLATES = {"infobox", "hatnote", "quote", "page-list"}
+
+
+def _is_block_template(name: str) -> bool:
+    """Templates that render as standalone blocks, not inline."""
+    return name in _BLOCK_TEMPLATES or name.startswith("infobox-")
 
 
 def _kebabize(name: str) -> str:
@@ -939,21 +950,32 @@ def _kebabize(name: str) -> str:
     return name.strip().lower().replace(" ", "-").replace("_", "-")
 
 
-def _emit_template_call(name: str, args: dict[str, str]) -> str:
-    """Emit a WikiMark ``{{name ...}}`` call with the given args."""
+def _emit_template_call(name: str, args: dict[str, str], *, block: bool = False) -> str:
+    """Emit a WikiMark ``{{name ...}}`` call with the given args.
+
+    When *block* is True, format with one arg per line for readability
+    (used for standalone templates like infoboxes). Inline templates
+    always stay on one line regardless of arg count.
+    """
     if not args:
         return f"{{{{{name}}}}}"
     parts = []
     for key, value in args.items():
         if not value:
             continue
-        # Keys that parse as positional in WikiMark (numeric) stay
-        # positional. Otherwise we always quote values.
         if key.isdigit():
             parts.append(f'"{_escape_arg(value)}"')
         else:
             parts.append(f'{key}="{_escape_arg(value)}"')
-    return f"{{{{{name} {' '.join(parts)}}}}}"
+    if not parts:
+        return f"{{{{{name}}}}}"
+    if not block:
+        return f"{{{{{name} {' '.join(parts)}}}}}"
+    lines = [f"{{{{{name}"]
+    for p in parts:
+        lines.append(f"  {p}")
+    lines.append("}}")
+    return "\n".join(lines)
 
 
 def _escape_arg(value: str) -> str:

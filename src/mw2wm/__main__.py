@@ -169,7 +169,8 @@ def _convert_mw_sidebar(source: str) -> str:
                 continue
 
             page_path = target.lower().replace(" ", "_")
-            current_links.append(f"* [{display}]({page_path})")
+            link_target = f"<{page_path}>" if "(" in page_path else page_path
+            current_links.append(f"* [{display}]({link_target})")
 
         elif stripped.startswith("* ") or stripped.startswith("*"):
             heading = stripped.lstrip("*").strip()

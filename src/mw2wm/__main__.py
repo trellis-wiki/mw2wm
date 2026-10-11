@@ -274,6 +274,11 @@ def _rewrite_links(content: str, rewrite_map: dict[str, str],
         """Return rewritten target, or None if no change needed."""
         # Check if target was explicitly relocated
         new_path = rewrite_map.get(key)
+        if new_path is None and key not in page_index:
+            # The target doesn't exist yet (a red link). Leave it relative so
+            # it resolves into this page's folder, where it will be written;
+            # a "/" would point it at the wiki root.
+            return None
         actual_path = new_path or page_index.get(key, key)
 
         if not page_folder:

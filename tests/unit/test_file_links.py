@@ -20,5 +20,5 @@ def test_thumb_gets_its_own_paragraph_so_it_renders_as_a_captioned_figure():
 
 def test_subpage_links_point_into_the_page_folder():
     out = convert_text("* [[/Chapter 1]]\n* [[/Prologue|The prologue]]", title="Book / The_Tower")
-    assert "[Chapter 1](the_tower/chapter_1)" in out
-    assert "[The prologue](the_tower/prologue)" in out
+    assert "[Chapter 1](./the_tower/chapter_1)" in out
+    assert "[The prologue](./the_tower/prologue)" in out

@@ -483,7 +483,7 @@ def _convert_wikilink(node: Any, state: _ConvertState) -> str:
         if target.startswith("../"):
             path = name.replace(" ", "_").lower() if name else f"../{own}"
         else:
-            path = f"{own}/{name.replace(' ', '_').lower()}"
+            path = f"./{own}/{name.replace(' ', '_').lower()}"
         shown = display or name or own.replace("_", " ")
         return f"[{shown}]({_md_link_target(path)})"
 

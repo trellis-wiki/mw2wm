@@ -70,7 +70,7 @@ _NS_MAP: dict[str, str | None] = {
     "Main": "pages",
     "Template": "templates",
     "Category": "categories",
-    "Book": "pages/Book",
+    "Book": "pages/book",
 }
 # Everything not listed is dropped with a report entry.
 
@@ -105,6 +105,10 @@ def _output_path_for(
 
     # Normalize the output filename
     raw = rest.with_suffix("").as_posix()
+    if target_dir not in ("templates", "categories"):
+        # MediaWiki subpages ("Title/Chapter 1") are exported with a lookalike
+        # slash (U+2215) because file names can't hold "/"; make them folders.
+        raw = raw.replace("∕", "/")
     if target_dir in ("templates", "categories"):
         # Template/category names use kebab-case to match call syntax
         normalized = raw.lower().replace(" ", "-").replace("_", "-") + ".wm"
@@ -208,6 +212,7 @@ def _convert_mw_sidebar(source: str) -> str:
 def _apply_category_path_rules(
     page, out_path: Path, output_dir: Path,
     rules: list[CategoryPathRule],
+    nest_namespaces: set[str] = frozenset(),
 ) -> Path:
     """If a converted page matches a category-to-path rule, relocate it
     into the folder and optionally strip the category from frontmatter.
@@ -240,13 +245,16 @@ def _apply_category_path_rules(
     except ValueError:
         return out_path
 
-    # Already in a subfolder of the target? Skip (e.g. Book/ pages)
     rel_to_pages = out_path.relative_to(pages_dir)
     if len(rel_to_pages.parts) > 1:
-        return out_path
-
-    # Move into folder: pages/foo.wm → pages/arthagog/foo.wm
-    new_path = pages_dir / matched_rule.folder / out_path.name
+        # A namespace folder (book/...): nest it under the category's folder
+        # when asked (book/x -> arthagog/book/x), otherwise leave it.
+        if rel_to_pages.parts[0] not in nest_namespaces:
+            return out_path
+        new_path = pages_dir / matched_rule.folder / rel_to_pages
+    else:
+        # Move into folder: pages/foo.wm → pages/arthagog/foo.wm
+        new_path = pages_dir / matched_rule.folder / out_path.name
 
     # Strip or preserve the category
     if not matched_rule.preserve:
@@ -390,7 +398,8 @@ def _rewrite_all_links(output_dir: Path, rewrite_map: dict[str, str]) -> int:
 
 def build(input_dir: Path, output_dir: Path,
           category_path_rules: list[CategoryPathRule] | None = None,
-          redirect_stubs: bool = False) -> int:
+          redirect_stubs: bool = False,
+          nest_namespaces: set[str] | None = None) -> int:
     pages_src = input_dir / "pages"
     if not pages_src.is_dir():
         print(f"error: {pages_src} not found", file=sys.stderr)
@@ -447,17 +456,32 @@ def build(input_dir: Path, output_dir: Path,
             if target_dir in ("templates", "categories"):
                 display = raw_name.lower().replace(" ", "-").replace("_", "-")
             else:
-                display = raw_name.replace("_", " ")
+                # A subpage is titled by its own name ("Chapter 1").
+                display = raw_name.split("∕")[-1].replace("_", " ")
             page.frontmatter["title"] = display
+
+        # Links to a page in another namespace ("Book:Title") point at its folder.
+        pages_dir = output_dir / "pages"
+        mw_ns = rel.parts[0] if rel.parts else ""
+        if mw_ns not in ("Main", "Template", "Category") and mw_ns in _NS_MAP:
+            ns_key = f"{mw_ns.lower()}:{Path(*rel.parts[1:]).with_suffix('').as_posix().replace('∕', '/').lower().replace(' ', '_')}"
+            rewrite_map[ns_key] = out_path.relative_to(pages_dir).with_suffix("").as_posix()
 
         # Apply category-to-path relocation
         if rules and not page.redirect:
-            new_path = _apply_category_path_rules(page, out_path, output_dir, rules)
+            new_path = _apply_category_path_rules(page, out_path, output_dir, rules, nest_namespaces or set())
             if new_path != out_path:
                 folder_name = new_path.parent.name
                 relocated[folder_name] = relocated.get(folder_name, 0) + 1
                 old_stem = out_path.stem
-                rewrite_map[old_stem] = f"{folder_name}/{old_stem}"
+                old_rel = out_path.relative_to(pages_dir).with_suffix("").as_posix()
+                new_rel = new_path.relative_to(pages_dir).with_suffix("").as_posix()
+                if "/" in old_rel:  # a nested namespace page
+                    for k, v in list(rewrite_map.items()):
+                        if v == old_rel:
+                            rewrite_map[k] = new_rel
+                else:
+                    rewrite_map[old_stem] = new_rel
                 if redirect_stubs:
                     new_wiki_path = f"{folder_name}/{old_stem}"
                     redirect_fm = _emit_frontmatter({"redirect": new_wiki_path})
@@ -560,6 +584,11 @@ def main(argv: list[str] | None = None) -> int:
              "Can be repeated.",
     )
     build_p.add_argument(
+        "--nest-namespace", action="append", dest="nest_namespaces", default=[], metavar="NAMESPACE",
+        help="Put pages of a content namespace (e.g. Book) under the folder of their "
+             "--category-to-path category: Book:Title in category X -> x/book/title. Can be repeated.",
+    )
+    build_p.add_argument(
         "--redirect-stubs", action="store_true", default=False,
         help="Write redirect stubs at old paths instead of rewriting links.",
     )
@@ -568,7 +597,8 @@ def main(argv: list[str] | None = None) -> int:
         rules = [CategoryPathRule.parse(s) for s in args.cat_path_rules]
         return build(args.input_dir, args.output_dir,
                      category_path_rules=rules,
-                     redirect_stubs=args.redirect_stubs)
+                     redirect_stubs=args.redirect_stubs,
+                     nest_namespaces={n.lower() for n in args.nest_namespaces})
     return 2
 
 

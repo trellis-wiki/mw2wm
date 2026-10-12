@@ -475,6 +475,18 @@ def _convert_wikilink(node: Any, state: _ConvertState) -> str:
         state.report.add("special-link", state.title, target)
         return display or target
 
+    # Subpage links: [[/Chapter 1]] is a page under this one, [[../Chapter 2]]
+    # a sibling. Subpages become a folder named after their parent page.
+    if target.startswith(("/", "../")):
+        own = state.title.split(" / ")[-1].split("∕")[-1].strip().replace(" ", "_").lower()
+        name = target.strip("/").split("/")[-1] if target.strip("/") else ""
+        if target.startswith("../"):
+            path = name.replace(" ", "_").lower() if name else f"../{own}"
+        else:
+            path = f"{own}/{name.replace(' ', '_').lower()}"
+        shown = display or name or own.replace("_", " ")
+        return f"[{shown}]({_md_link_target(path)})"
+
     # Normal wiki link
     if display:
         return f"[{display}]({_md_link_target(target)})"
@@ -588,7 +600,13 @@ def _convert_file_link(node: Any, state: _ConvertState) -> str:
 
     attr_block = " ".join(attrs)
     attr_str = f"{{{attr_block}}}" if attr_block else ""
-    return f"![{alt}]({href}){attr_str}"
+    image = f"![{alt}]({href}){attr_str}"
+    if any(c in ("thumb", "thumbnail", "frame") for c in classes):
+        # A thumb or frame is a captioned block in MediaWiki wherever it sits
+        # in the text; in WikiMark only a standalone image becomes a figure
+        # with a caption, so give it a paragraph of its own.
+        return f"\n\n{image}\n\n"
+    return image
 
 
 def _split_params(s: str) -> list[str]:

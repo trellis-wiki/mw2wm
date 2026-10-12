@@ -21,3 +21,8 @@ def test_page_at_root_or_other_folder_gets_absolute_path():
 def test_missing_page_stays_relative_so_it_lands_in_this_folder():
     assert rewrite("[[Victor Koval]]") == "[[Victor Koval]]"
     assert rewrite("[the emperor](Victor_Koval)") == "[the emperor](Victor_Koval)"
+
+
+def test_images_are_not_rewritten_as_links():
+    src = "![A young man](Young_Man_In_Town.jpg){.thumb width=256}"
+    assert rewrite(src) == src

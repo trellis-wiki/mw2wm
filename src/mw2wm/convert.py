@@ -537,9 +537,10 @@ def _convert_file_link(node: Any, state: _ConvertState) -> str:
             elif _FILE_SIZE_RE.match(part):
                 m = _FILE_SIZE_RE.match(part)
                 assert m is not None
+                # "WxHpx" in MediaWiki fits the image inside a WxH box keeping
+                # its aspect ratio; fixed width and height would distort it,
+                # so keep the width only.
                 width = m.group(1)
-                if m.group(2):
-                    height = m.group(2)
             elif part.startswith("alt="):
                 alt_text = part[4:]
             elif part.startswith(("link=", "page=", "class=", "lang=",

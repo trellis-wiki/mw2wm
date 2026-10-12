@@ -338,8 +338,9 @@ def _rewrite_links(content: str, rewrite_map: dict[str, str],
         return m.group(0)
 
     content = re.sub(r"\[\[([^\]]+)\]\]", _rewrite_shorthand, content)
-    content = re.sub(r"\[([^\]]+)\]\(<([^>]+)>\)", _rewrite_angle, content)
-    content = re.sub(r"\[([^\]]+)\]\(([^)<][^)]*)\)", _rewrite_explicit, content)
+    # (?<!!): images are files, not pages; leave their names and paths alone.
+    content = re.sub(r"(?<!!)\[([^\]]+)\]\(<([^>]+)>\)", _rewrite_angle, content)
+    content = re.sub(r"(?<!!)\[([^\]]+)\]\(([^)<][^)]*)\)", _rewrite_explicit, content)
     content = re.sub(r"^redirect:\s*(.+)$", _rewrite_redirect, content, flags=re.MULTILINE)
     return content
 

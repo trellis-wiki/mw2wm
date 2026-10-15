@@ -1015,8 +1015,14 @@ def _convert_external_link(node: Any, state: _ConvertState) -> str:
 
 
 def _convert_heading(node: Any, state: _ConvertState) -> str:
-    """``== Heading ==`` → ``## Heading``."""
-    level = node.level
+    """``== Heading ==`` → ``# Heading``.
+
+    MediaWiki keeps level 1 for the page title, so articles start their
+    sections at ``==``. In WikiMark the title lives in frontmatter and the
+    first level is the article's own top-level heading: every level moves
+    up one (``=`` and ``==`` both become ``#``).
+    """
+    level = max(1, node.level - 1)
     text = _convert_nodes(node.title.nodes, state).strip()
     return "\n" + "#" * level + " " + text + "\n"
 
